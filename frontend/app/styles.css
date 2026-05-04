@@ -1,0 +1,110 @@
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  color: #202124;
+  background: #f5f7fa;
+}
+
+button,
+input {
+  font: inherit;
+}
+
+button {
+  border: 1px solid #c9d3df;
+  background: #ffffff;
+  border-radius: 6px;
+  padding: 10px 12px;
+  display: inline-flex;
+  gap: 8px;
+  align-items: center;
+  cursor: pointer;
+}
+
+button:hover {
+  background: #eef4fb;
+}
+
+input {
+  border: 1px solid #c9d3df;
+  border-radius: 6px;
+  padding: 10px 12px;
+  min-width: 260px;
+}
+
+.shell {
+  min-height: 100vh;
+  display: grid;
+  grid-template-columns: 260px 1fr;
+}
+
+.login {
+  display: grid;
+  grid-template-columns: 1fr;
+  place-items: center;
+}
+
+aside {
+  background: #17202a;
+  color: #ffffff;
+  padding: 24px;
+}
+
+aside button {
+  color: #17202a;
+}
+
+.workspace {
+  padding: 28px;
+}
+
+header,
+.toolbar,
+.actions {
+  display: flex;
+  gap: 12px;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.toolbar,
+.actions {
+  justify-content: flex-start;
+  margin: 16px 0;
+}
+
+.grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+  gap: 12px;
+}
+
+.card,
+.panel {
+  border: 1px solid #d8e1ea;
+  background: #ffffff;
+  border-radius: 8px;
+  padding: 16px;
+}
+
+.card {
+  display: grid;
+  text-align: left;
+  gap: 6px;
+}
+
+.card.active {
+  border-color: #206bc4;
+  box-shadow: 0 0 0 2px rgba(32, 107, 196, 0.14);
+}
+
+pre {
+  overflow: auto;
+  background: #eef2f6;
+  padding: 12px;
+  border-radius: 6px;
+}

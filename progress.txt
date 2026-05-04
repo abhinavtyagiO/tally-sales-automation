@@ -1,0 +1,43 @@
+# Progress
+
+## Completed
+
+- Task 1: Required voucher dates through upload, preview, and commit. Excel parsing now requires `voucher_date`, API requests can supply row-level or import-level dates, generated vouchers include `Date`, and commit revalidates dates before Tally submission.
+- Task 2: Replaced first-match Sales Accounts lookup with explicit `SALES_LEDGER_NAME` configuration. Voucher preview/building now fails clearly when the configured Sales ledger is absent.
+- Task 3: Added master cache freshness metadata and guards. Sync records `last_sync_at` and status, cache responses expose readiness/staleness, and processing fails when masters are missing or stale.
+- Task 4: Added row-level preflight behavior for products, ledgers, prices, payment modes, dates, and voucher balance. Mixed valid/invalid rows return ready vouchers plus per-row errors.
+- Task 5: Kept UPI fallback ledger creation restricted to commit. Only the configured fallback ledger/group can be created, the operation is logged, and other missing ledgers still fail validation.
+- Task 6: Added source-row metadata and duplicate detection. Voucher logs store import/source identifiers and source fingerprints; repeated successful source rows are rejected with row-level feedback.
+- Task 7: Normalized commit around row-derived vouchers. Raw voucher payload commit is no longer part of the MVP request contract; commit rebuilds and revalidates from sale rows.
+- Task 8: Implemented XML-capable Tally transport and documented the decision. `TALLY_TRANSPORT` defaults to `xml`, with JSON still available for compatible middleware/test doubles.
+- Task 9: Added an API/service behavior test suite using unittest and mocked Tally responses. Tests cover parsing, sync/cache, preview, commit, UPI fallback creation, duplicate detection, XML transport, and Tally errors.
+- Task 10: Documented the MVP operator flow and supported Excel contract in `README.md`.
+
+## Verification
+
+- `env PYTHONPYCACHEPREFIX=/Users/abhinav/Desktop/tally-sales-automation-mvp/.pycache .venv/bin/python -m unittest discover -s tests`
+- Result: 11 tests passed.
+
+## Parent #2 Completed
+
+- Task 1: Migrated the DB model to users, sessions, companies, local agents, imports, import rows, company-scoped masters, and scoped voucher logs.
+- Task 2: Added Google-token session authentication with server-side hashed sessions and protected product routes.
+- Task 3: Added user-owned company CRUD/selection, ownership checks, per-user company uniqueness, company ledger defaults, and master invalidation on connection changes.
+- Task 4: Added local-agent pairing token, pair, heartbeat, and revocation APIs.
+- Task 5: Added a runnable local-agent MVP service under `local_agent/` for Tally HTTP execution.
+- Task 6: Replaced company sync with company-scoped local-agent sync using selected company config.
+- Task 7: Added persisted imports and import rows per company.
+- Task 8: Moved preview validation to persisted import rows with company-scoped master lookup.
+- Task 9: Added import-row commit through the paired local agent with row-level results and failed-row retry behavior.
+- Task 10: Scoped duplicate detection and voucher logs by user, company, import, and row.
+- Task 11: Added a Next.js authentication shell and protected dashboard scaffold.
+- Task 12: Added Next.js company and local-agent setup flow.
+- Task 13: Added Next.js sync/import workflow scaffold and import action surface.
+- Task 14: Updated documentation for deployment, setup, local agent, Excel contract, sync/import flow, retries, and non-goals.
+
+## Parent #2 Verification
+
+- `env PYTHONPYCACHEPREFIX=/Users/abhinav/Desktop/tally-sales-automation-mvp/.pycache .venv/bin/python -m unittest discover -s tests`
+- Result: 19 tests passed.
+- `cd frontend && pnpm run build`
+- Result: Next.js 16.2.4 production build passed.

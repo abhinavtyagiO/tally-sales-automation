@@ -1,0 +1,13 @@
+.venv/
+__pycache__/
+.pycache/
+*.pyc
+backend/tally_sales.db
+node_modules/
+.next/
+.pnpm-store/
+.agents/
+issues-to-create.md
+mvp-brief.md
+prd-multi-company-local-agent.md
+progress.md
