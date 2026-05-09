@@ -133,6 +133,40 @@ class Parent2FlowTests(unittest.TestCase):
         self.assertEqual(len(database.list_stock_items(first["id"])), 1)
         self.assertEqual(len(database.list_stock_items(second["id"])), 1)
 
+    def test_init_db_migrates_legacy_global_master_uniqueness(self) -> None:
+        with database.get_connection() as connection:
+            connection.executescript(
+                """
+                DROP TABLE stock_items;
+                DROP TABLE ledgers;
+                CREATE TABLE stock_items (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    name TEXT NOT NULL UNIQUE,
+                    company_id INTEGER
+                );
+                CREATE TABLE ledgers (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    name TEXT NOT NULL UNIQUE,
+                    "group" TEXT,
+                    company_id INTEGER
+                );
+                """
+            )
+
+        first = self.make_company(company_name="Company A")
+        second = self.make_company(company_name="Company B")
+        database.init_db()
+
+        database.replace_stock_items(["Keyboard", "Monitor"], company_id=first["id"])
+        database.replace_stock_items(["Keyboard", "Mouse"], company_id=second["id"])
+        database.replace_ledgers([{"name": "Sales", "group": "Sales Accounts"}], company_id=first["id"])
+        database.replace_ledgers([{"name": "Sales", "group": "Direct Incomes"}], company_id=second["id"])
+
+        self.assertEqual({item["name"] for item in database.list_stock_items(first["id"])}, {"Keyboard", "Monitor"})
+        self.assertEqual({item["name"] for item in database.list_stock_items(second["id"])}, {"Keyboard", "Mouse"})
+        self.assertEqual(database.get_ledger_by_name("Sales", first["id"])["group"], "Sales Accounts")
+        self.assertEqual(database.get_ledger_by_name("Sales", second["id"])["group"], "Direct Incomes")
+
     def test_company_crud_enforces_ownership_and_invalidates_masters(self) -> None:
         company = self.make_company()
         self.seed_company_masters(company)
@@ -250,6 +284,99 @@ class Parent2FlowTests(unittest.TestCase):
         self.assertEqual(result["import"]["valid_count"], 1)
         self.assertEqual(result["rows"][0]["validation_status"], "valid")
         self.assertEqual(result["rows"][0]["voucher_preview"]["Date"], "2026-05-04")
+
+    def test_company_upi_rows_preview_and_create_fallback_ledger_on_commit(self) -> None:
+        company = self.make_company()
+        agent = self.make_agent()
+        database.update_company(company["id"], self.user["id"], {"local_agent_id": agent["id"]})
+        self.seed_company_masters(company, include_upi=False)
+        rows = [
+            {
+                "product_name": "2.75-18 NGP",
+                "price": 1600,
+                "payment_mode": "UPI",
+                "voucher_date": "2026-05-04",
+                "source_row_id": "2",
+            }
+        ]
+        import_record = database.create_import(self.user["id"], company["id"], "sales.xlsx", rows)
+        processed = routes.process_import(company["id"], import_record["id"], user=self.user)
+
+        operations: list[str] = []
+
+        def fake_dispatch(agent_arg, operation, payload):
+            operations.append(operation)
+            if operation == "health_check":
+                return {"status": "connected"}
+            if operation == "create_ledger":
+                self.assertEqual(payload["name"], "UPI Sales")
+                self.assertEqual(payload["company_name"], "Bhrama Enterprises")
+                return {"STATUS": "1"}
+            if operation == "create_sales_voucher":
+                return {"STATUS": "1"}
+            return self.fake_master_dispatch(agent_arg, operation, payload)
+
+        with patch("backend.services.local_agent_service.dispatch_tally_operation", side_effect=fake_dispatch):
+            committed = routes.commit_import(company["id"], import_record["id"], routes.CommitRequest(), user=self.user)
+
+        self.assertEqual(processed["import"]["valid_count"], 1)
+        self.assertEqual(processed["rows"][0]["validation_status"], "valid")
+        self.assertEqual(committed["success_count"], 1)
+        self.assertIn("create_ledger", operations)
+        self.assertIsNotNone(database.get_ledger_by_name("UPI Sales", company_id=company["id"]))
+
+    def test_missing_configured_ledgers_are_created_on_commit(self) -> None:
+        company = self.make_company()
+        agent = self.make_agent()
+        database.update_company(
+            company["id"],
+            self.user["id"],
+            {
+                "local_agent_id": agent["id"],
+                "sales_ledger_name": "Retail Sales",
+                "sales_ledger_group_name": "Sales Accounts",
+                "payment_default_group_name": "Sundry Debtors",
+                "payment_ledger_mappings": {
+                    "card": {"ledger_name": "Card Collections", "group_name": "Bank Accounts"},
+                },
+            },
+        )
+        company = database.get_company(company["id"], user_id=self.user["id"])
+        database.replace_stock_items(["2.75-18 NGP"], company_id=company["id"])
+        database.replace_ledgers([{"name": "Existing Ledger", "group": "Current Assets"}], company_id=company["id"])
+        database.set_company_sync(company["id"], "success", database.utc_now())
+        rows = [
+            {
+                "product_name": "2.75-18 NGP",
+                "price": 1600,
+                "payment_mode": "Card",
+                "voucher_date": "2026-05-04",
+                "source_row_id": "2",
+            }
+        ]
+        import_record = database.create_import(self.user["id"], company["id"], "sales.xlsx", rows)
+        processed = routes.process_import(company["id"], import_record["id"], user=self.user)
+
+        created_ledgers: list[tuple[str, str]] = []
+
+        def fake_dispatch(agent_arg, operation, payload):
+            if operation == "health_check":
+                return {"status": "connected"}
+            if operation == "create_ledger":
+                created_ledgers.append((payload["name"], payload["group_name"]))
+                return {"STATUS": "1"}
+            if operation == "create_sales_voucher":
+                return {"STATUS": "1"}
+            return self.fake_master_dispatch(agent_arg, operation, payload)
+
+        with patch("backend.services.local_agent_service.dispatch_tally_operation", side_effect=fake_dispatch):
+            committed = routes.commit_import(company["id"], import_record["id"], routes.CommitRequest(), user=self.user)
+
+        self.assertEqual(processed["import"]["valid_count"], 1)
+        self.assertEqual(committed["success_count"], 1)
+        self.assertEqual(created_ledgers, [("Retail Sales", "Sales Accounts"), ("Card Collections", "Bank Accounts")])
+        self.assertIsNotNone(database.get_ledger_by_name("Retail Sales", company_id=company["id"]))
+        self.assertIsNotNone(database.get_ledger_by_name("Card Collections", company_id=company["id"]))
 
     def test_commit_import_rows_through_local_agent_and_blocks_duplicates(self) -> None:
         company = self.make_company()

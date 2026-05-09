@@ -8,7 +8,6 @@ import pandas as pd
 
 
 REQUIRED_COLUMNS = {"product_name", "price", "payment_mode", "voucher_date"}
-VALID_PAYMENT_MODES = {"cash", "upi"}
 
 
 class ExcelParseError(ValueError):
@@ -40,10 +39,8 @@ def parse_excel(content: bytes) -> list[dict[str, Any]]:
             raise ExcelParseError(f"Row {index + 2}: product_name is required")
         if pd.isna(price) or float(price) <= 0:
             raise ExcelParseError(f"Row {index + 2}: price must be a positive number")
-        if payment_mode not in VALID_PAYMENT_MODES:
-            raise ExcelParseError(
-                f"Row {index + 2}: payment_mode must be one of {', '.join(sorted(VALID_PAYMENT_MODES))}"
-            )
+        if not payment_mode or payment_mode == "nan":
+            raise ExcelParseError(f"Row {index + 2}: payment_mode is required")
         if voucher_date is None:
             raise ExcelParseError(f"Row {index + 2}: voucher_date is required")
 

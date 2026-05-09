@@ -44,7 +44,7 @@ The MVP accepts `.xlsx` or `.xls` uploads with these required columns:
 
 - `product_name`: exact Tally Stock Item name.
 - `price`: positive numeric amount. GST splitting is out of scope, so this amount maps directly to the voucher value.
-- `payment_mode`: `Cash` or `UPI`, matched case-insensitively.
+- `payment_mode`: payment ledger mode, matched case-insensitively. `Cash` and `UPI` have default ledger mappings, and additional modes can be configured per company.
 - `voucher_date`: accounting voucher date in a parseable date format. API requests should use `YYYY-MM-DD`.
 
 Each row represents one Sales Voucher with quantity fixed at `1`.
@@ -76,7 +76,7 @@ The backend rejects or flags rows when:
 - The built voucher is not balanced.
 - The active company is missing or owned by another user.
 
-Duplicate-looking sales rows are allowed because the same item can be sold more than once on the same day. During commit only, the system may create the configured UPI fallback ledger under the configured fallback group. No Stock Items or arbitrary ledgers are auto-created.
+Duplicate-looking sales rows are allowed because the same item can be sold more than once on the same day. During commit only, the system creates missing configured ledgers needed for the voucher, such as the sales ledger or payment ledgers. No Stock Items are auto-created.
 
 ## Tally Transport
 

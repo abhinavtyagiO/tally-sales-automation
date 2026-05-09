@@ -81,32 +81,97 @@ def build_vouchers(
 
 def _resolve_sales_ledger(company: dict[str, Any] | None = None) -> str | None:
     company_id = company["id"] if company else None
-    sales_ledger_name = company.get("sales_ledger_name") if company else config.SALES_LEDGER_NAME
+    sales_ledger_name = _company_value(company, "sales_ledger_name", config.SALES_LEDGER_NAME)
     ledger = database.get_ledger_by_name(sales_ledger_name, company_id=company_id)
+    if company:
+        return ledger["name"] if ledger else sales_ledger_name
     return ledger["name"] if ledger else None
 
 
 def _sales_ledger_error(company: dict[str, Any] | None = None) -> str:
-    sales_ledger_name = company.get("sales_ledger_name") if company else config.SALES_LEDGER_NAME
+    sales_ledger_name = _company_value(company, "sales_ledger_name", config.SALES_LEDGER_NAME)
     return f'Required sales ledger "{sales_ledger_name}" not found in cache'
 
 
 def _resolve_party_ledger(payment_mode: str, ensure_ledgers: bool, company: dict[str, Any] | None = None) -> str:
     company_id = company["id"] if company else None
-    cash_ledger = company.get("cash_ledger_name") if company else config.CASH_LEDGER_NAME
-    upi_ledger = company.get("upi_fallback_ledger_name") if company else config.UPI_FALLBACK_LEDGER
-    upi_group = company.get("upi_fallback_group_name") if company else config.UPI_FALLBACK_GROUP
-    if payment_mode == "cash":
-        if not database.get_ledger_by_name(cash_ledger, company_id=company_id):
-            raise VoucherBuildError(f'Required cash ledger "{cash_ledger}" not found in cache')
-        return cash_ledger
-    if payment_mode == "upi":
-        if ensure_ledgers:
-            _ensure_ledger_exists(upi_ledger, upi_group, company=company)
-        if not database.get_ledger_by_name(upi_ledger, company_id=company_id):
-            raise VoucherBuildError(f'Required fallback ledger "{upi_ledger}" not found in cache')
-        return upi_ledger
-    raise VoucherBuildError(f"Unsupported payment mode: {payment_mode}")
+    ledger = resolve_payment_ledger(payment_mode, company)
+    if ensure_ledgers:
+        _ensure_ledger_exists(ledger["ledger_name"], ledger["group_name"], company=company)
+    if not database.get_ledger_by_name(ledger["ledger_name"], company_id=company_id):
+        if company:
+            return ledger["ledger_name"]
+        raise VoucherBuildError(f'Required payment ledger "{ledger["ledger_name"]}" not found in cache')
+    return ledger["ledger_name"]
+
+
+def resolve_payment_ledger(payment_mode: str, company: dict[str, Any] | None = None) -> dict[str, str]:
+    normalized = str(payment_mode).strip().lower()
+    mappings = _payment_ledger_mappings(company)
+    if normalized in mappings:
+        return mappings[normalized]
+    fallback_name = _payment_mode_to_ledger_name(normalized)
+    return {
+        "ledger_name": fallback_name,
+        "group_name": _company_value(company, "payment_default_group_name", config.DEFAULT_PAYMENT_LEDGER_GROUP),
+    }
+
+
+def required_ledgers_for_rows(rows: list[dict[str, Any]], company: dict[str, Any]) -> list[dict[str, str]]:
+    required = [
+        {
+            "ledger_name": _company_value(company, "sales_ledger_name", config.SALES_LEDGER_NAME),
+            "group_name": _company_value(company, "sales_ledger_group_name", config.SALES_LEDGER_GROUP),
+        }
+    ]
+    for row in rows:
+        required.append(resolve_payment_ledger(str(row.get("payment_mode", "")), company))
+
+    deduped: dict[str, dict[str, str]] = {}
+    for ledger in required:
+        name = ledger["ledger_name"].strip()
+        if name:
+            deduped.setdefault(name.lower(), {"ledger_name": name, "group_name": ledger["group_name"]})
+    return list(deduped.values())
+
+
+def _payment_ledger_mappings(company: dict[str, Any] | None = None) -> dict[str, dict[str, str]]:
+    mappings: dict[str, dict[str, str]] = {
+        "cash": {
+            "ledger_name": _company_value(company, "cash_ledger_name", config.CASH_LEDGER_NAME),
+            "group_name": _company_value(company, "cash_ledger_group_name", config.CASH_LEDGER_GROUP),
+        },
+        "upi": {
+            "ledger_name": _company_value(company, "upi_fallback_ledger_name", config.UPI_FALLBACK_LEDGER),
+            "group_name": _company_value(company, "upi_fallback_group_name", config.UPI_FALLBACK_GROUP),
+        },
+    }
+    raw = company.get("payment_ledger_mappings") if company else None
+    if raw:
+        try:
+            custom = json.loads(raw) if isinstance(raw, str) else raw
+        except (TypeError, ValueError):
+            custom = {}
+        if isinstance(custom, dict):
+            for mode, item in custom.items():
+                if not isinstance(item, dict):
+                    continue
+                ledger_name = str(item.get("ledger_name", "")).strip()
+                group_name = str(item.get("group_name") or _company_value(company, "payment_default_group_name", config.DEFAULT_PAYMENT_LEDGER_GROUP)).strip()
+                if ledger_name:
+                    mappings[str(mode).strip().lower()] = {"ledger_name": ledger_name, "group_name": group_name}
+    return mappings
+
+
+def _payment_mode_to_ledger_name(payment_mode: str) -> str:
+    return " ".join(part.capitalize() for part in payment_mode.replace("_", " ").replace("-", " ").split())
+
+
+def _company_value(company: dict[str, Any] | None, key: str, default: str) -> str:
+    if not company:
+        return default
+    value = company.get(key)
+    return str(value).strip() if value else default
 
 
 def _ensure_ledger_exists(name: str, group_name: str, company: dict[str, Any] | None = None) -> None:

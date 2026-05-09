@@ -6,6 +6,7 @@ from typing import Any, Optional
 import requests
 from fastapi import HTTPException
 
+from backend import config
 from backend.db import database
 from backend.services.tally_client import TallyError
 
@@ -87,6 +88,23 @@ def get_active_agent(user_id: int) -> dict[str, Any]:
         logger.warning("local_agent.active_agent.missing user_id=%s", user_id)
         raise TallyError("Tally connection is not available")
     logger.info("local_agent.active_agent.found user_id=%s agent_id=%s base_url=%s", user_id, agent["id"], agent.get("base_url"))
+    return agent
+
+
+def get_or_create_active_agent(user_id: int) -> dict[str, Any]:
+    agent = database.get_active_local_agent(user_id)
+    if agent:
+        logger.info("local_agent.active_agent.found user_id=%s agent_id=%s base_url=%s", user_id, agent["id"], agent.get("base_url"))
+        return agent
+
+    base_url = config.LOCAL_AGENT_URL.rstrip("/")
+    if not base_url:
+        logger.warning("local_agent.bootstrap.failed user_id=%s reason=missing_local_agent_url", user_id)
+        raise TallyError("Tally connection is not available")
+
+    pairing = create_pairing_token(user_id, "Local Tally connector", base_url)
+    agent = pair_agent(pairing["pairing_token"], "Local Tally connector", base_url)
+    logger.info("local_agent.bootstrap.success user_id=%s agent_id=%s base_url=%s", user_id, agent["id"], base_url)
     return agent
 
 

@@ -21,12 +21,16 @@ _load_local_env()
 
 TALLY_URL = os.getenv("TALLY_URL", "http://localhost:9000")
 TALLY_TRANSPORT = os.getenv("TALLY_TRANSPORT", "xml").lower()
+LOCAL_AGENT_URL = os.getenv("LOCAL_AGENT_URL", "http://localhost:9100")
 GOOGLE_CLIENT_ID = os.getenv("GOOGLE_CLIENT_ID", "")
 ALLOW_DEV_AUTH = os.getenv("ALLOW_DEV_AUTH", "false").lower() == "true"
 SESSION_TTL_DAYS = int(os.getenv("SESSION_TTL_DAYS", "7"))
 COOKIE_SECURE = os.getenv("COOKIE_SECURE", "false").lower() == "true"
 SALES_LEDGER_NAME = os.getenv("SALES_LEDGER_NAME", "Sales")
+SALES_LEDGER_GROUP = os.getenv("SALES_LEDGER_GROUP", "Sales Accounts")
 CASH_LEDGER_NAME = os.getenv("CASH_LEDGER_NAME", "Cash")
+CASH_LEDGER_GROUP = os.getenv("CASH_LEDGER_GROUP", "Cash-in-Hand")
 MASTER_CACHE_MAX_AGE_HOURS = int(os.getenv("MASTER_CACHE_MAX_AGE_HOURS", "24"))
 UPI_FALLBACK_LEDGER = os.getenv("UPI_FALLBACK_LEDGER", "UPI Sales")
 UPI_FALLBACK_GROUP = os.getenv("UPI_FALLBACK_GROUP", "Sundry Debtors")
+DEFAULT_PAYMENT_LEDGER_GROUP = os.getenv("DEFAULT_PAYMENT_LEDGER_GROUP", "Sundry Debtors")

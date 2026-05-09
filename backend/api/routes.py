@@ -16,7 +16,7 @@ from backend.services.excel_parser import ExcelParseError, parse_excel
 from backend.services.sync_service import get_cache_snapshot, get_company_cache_snapshot, sync_from_tally
 from backend.services.tally_client import TallyClient, TallyError
 from backend.services.tally_status_service import ensure_tally_reachable, get_tally_status, list_tally_companies
-from backend.services.voucher_builder import VoucherBuildError, build_vouchers, validate_voucher
+from backend.services.voucher_builder import VoucherBuildError, build_vouchers, required_ledgers_for_rows, validate_voucher
 
 
 router = APIRouter()
@@ -27,13 +27,22 @@ class AuthRequest(BaseModel):
     id_token: str
 
 
+class PaymentLedgerConfig(BaseModel):
+    ledger_name: str
+    group_name: str = config.DEFAULT_PAYMENT_LEDGER_GROUP
+
+
 class CompanyRequest(BaseModel):
     company_name: str
     tally_url: str = config.TALLY_URL
-    sales_ledger_name: str = "Sales"
-    cash_ledger_name: str = "Cash"
-    upi_fallback_ledger_name: str = "UPI Sales"
-    upi_fallback_group_name: str = "Sundry Debtors"
+    sales_ledger_name: str = config.SALES_LEDGER_NAME
+    sales_ledger_group_name: str = config.SALES_LEDGER_GROUP
+    cash_ledger_name: str = config.CASH_LEDGER_NAME
+    cash_ledger_group_name: str = config.CASH_LEDGER_GROUP
+    upi_fallback_ledger_name: str = config.UPI_FALLBACK_LEDGER
+    upi_fallback_group_name: str = config.UPI_FALLBACK_GROUP
+    payment_default_group_name: str = config.DEFAULT_PAYMENT_LEDGER_GROUP
+    payment_ledger_mappings: dict[str, PaymentLedgerConfig] = Field(default_factory=dict)
     local_agent_id: Optional[int] = None
 
 
@@ -41,9 +50,13 @@ class CompanyUpdateRequest(BaseModel):
     company_name: Optional[str] = None
     tally_url: Optional[str] = None
     sales_ledger_name: Optional[str] = None
+    sales_ledger_group_name: Optional[str] = None
     cash_ledger_name: Optional[str] = None
+    cash_ledger_group_name: Optional[str] = None
     upi_fallback_ledger_name: Optional[str] = None
     upi_fallback_group_name: Optional[str] = None
+    payment_default_group_name: Optional[str] = None
+    payment_ledger_mappings: Optional[dict[str, PaymentLedgerConfig]] = None
     local_agent_id: Optional[int] = None
 
 
@@ -257,7 +270,11 @@ async def upload_company_excel(
     company = database.get_company(company_id, user_id=user["id"])
     rows = await _parse_upload(file)
     import_record = database.create_import(user["id"], company_id, file.filename, rows)
-    processed = _process_import_rows(company, import_record["id"], user)
+    try:
+        processed = _process_import_rows(company, import_record["id"], user)
+    except VoucherBuildError as exc:
+        logger.warning("import.upload.validation_failed user_id=%s company_id=%s import_id=%s error=%r", user["id"], company_id, import_record["id"], exc)
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     logger.info("import.upload.success user_id=%s company_id=%s import_id=%s rows=%s", user["id"], company_id, import_record["id"], len(rows))
     return {
         "import": processed["import"],
@@ -298,7 +315,8 @@ def commit_import(
         and row["commit_status"] != "success"
         and (not request.import_row_ids or row["id"] in request.import_row_ids)
     ]
-    result = build_vouchers([_row_to_sale(row) for row in rows], ensure_ledgers=True, company=company, user_id=user["id"])
+    _ensure_company_commit_ledgers(company, agent, rows)
+    result = build_vouchers([_row_to_sale(row) for row in rows], ensure_ledgers=False, company=company, user_id=user["id"])
     results: list[dict[str, Any]] = []
     logger.info("import.commit.start user_id=%s company_id=%s import_id=%s row_count=%s", user["id"], company_id, import_id, len(rows))
     for voucher in result.vouchers:
@@ -478,6 +496,26 @@ def _process_import_rows(company: dict[str, Any], import_id: int, user: dict[str
         "import": database.get_import(import_id, user["id"], company["id"]),
         "rows": database.list_import_rows(import_id, company["id"]),
     }
+
+
+def _ensure_company_commit_ledgers(company: dict[str, Any], agent: dict[str, Any], rows: list[dict[str, Any]]) -> None:
+    for ledger in required_ledgers_for_rows([_row_to_sale(row) for row in rows], company):
+        ledger_name = ledger["ledger_name"]
+        group_name = ledger["group_name"]
+        if database.get_ledger_by_name(ledger_name, company_id=company["id"]):
+            continue
+        logger.info("import.commit.create_missing_ledger company_id=%s ledger_name=%s group_name=%s", company["id"], ledger_name, group_name)
+        local_agent_service.dispatch_tally_operation(
+            agent,
+            "create_ledger",
+            {
+                "name": ledger_name,
+                "group_name": group_name,
+                "company_name": company["company_name"],
+                "tally_url": company["tally_url"],
+            },
+        )
+        database.upsert_ledger(ledger_name, group_name, company_id=company["id"])
 
 
 def _active_company_id(companies: list[dict[str, Any]]) -> int | None:

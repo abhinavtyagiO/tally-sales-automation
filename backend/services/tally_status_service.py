@@ -12,7 +12,7 @@ logger = logging.getLogger(__name__)
 
 def get_tally_status(user_id: int) -> dict[str, Any]:
     try:
-        agent = local_agent_service.get_active_agent(user_id)
+        agent = local_agent_service.get_or_create_active_agent(user_id)
         local_agent_service.dispatch_tally_operation(agent, "health_check", {})
     except TallyError as exc:
         detail = _classify_error(str(exc))
@@ -27,7 +27,7 @@ def get_tally_status(user_id: int) -> dict[str, Any]:
 
 def list_tally_companies(user_id: int) -> dict[str, Any]:
     try:
-        agent = local_agent_service.get_active_agent(user_id)
+        agent = local_agent_service.get_or_create_active_agent(user_id)
         response = local_agent_service.dispatch_tally_operation(agent, "list_companies", {})
     except TallyError as exc:
         detail = _classify_error(str(exc))
@@ -44,7 +44,7 @@ def list_tally_companies(user_id: int) -> dict[str, Any]:
 
 
 def ensure_tally_reachable(user_id: int) -> dict[str, Any]:
-    agent = local_agent_service.get_active_agent(user_id)
+    agent = local_agent_service.get_or_create_active_agent(user_id)
     local_agent_service.dispatch_tally_operation(agent, "health_check", {})
     logger.info("tally.reachable user_id=%s agent_id=%s", user_id, agent.get("id"))
     return agent

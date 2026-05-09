@@ -173,18 +173,7 @@ class TallyClient:
         return [company] if company else []
 
     def create_ledger(self, name: str, group_name: str, company_name: str | None = None) -> dict[str, Any]:
-        data = {
-            "Ledger": {
-                "Name": name,
-                "Parent": group_name,
-            }
-        }
-        if company_name:
-            data["StaticVariables"] = {"SVCurrentCompany": company_name}
-        return self.import_data(
-            "Ledger",
-            data,
-        )
+        return self._post_xml(_ledger_master_xml(name, group_name, company_name))
 
     def create_sales_voucher(self, voucher: dict[str, Any], company_name: str | None = None) -> dict[str, Any]:
         return self._post_xml(_sales_voucher_xml(voucher, company_name))
@@ -367,6 +356,39 @@ def _sales_voucher_xml(voucher: dict[str, Any], company_name: str | None = None)
             {sales_entry}
           </VOUCHER>
         </TALLYMESSAGE>
+    </DATA>
+  </BODY>
+</ENVELOPE>"""
+
+
+def _ledger_master_xml(name: str, group_name: str, company_name: str | None = None) -> str:
+    ledger_name = _xml_text(name)
+    parent = _xml_text(group_name)
+    company_xml = ""
+    if company_name:
+        company_xml = f"<SVCURRENTCOMPANY>{_xml_text(company_name)}</SVCURRENTCOMPANY>"
+    return f"""<ENVELOPE>
+  <HEADER>
+    <VERSION>1</VERSION>
+    <TALLYREQUEST>Import</TALLYREQUEST>
+    <TYPE>Data</TYPE>
+    <ID>All Masters</ID>
+  </HEADER>
+  <BODY>
+    <DESC>
+      <STATICVARIABLES>
+        {company_xml}
+      </STATICVARIABLES>
+    </DESC>
+    <DATA>
+      <TALLYMESSAGE xmlns:UDF="TallyUDF">
+        <LEDGER NAME="{ledger_name}" ACTION="Create">
+          <NAME>{ledger_name}</NAME>
+          <PARENT>{parent}</PARENT>
+          <ISBILLWISEON>No</ISBILLWISEON>
+          <AFFECTSSTOCK>No</AFFECTSSTOCK>
+        </LEDGER>
+      </TALLYMESSAGE>
     </DATA>
   </BODY>
 </ENVELOPE>"""

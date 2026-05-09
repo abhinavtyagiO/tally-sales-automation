@@ -68,9 +68,13 @@ def init_db() -> None:
                 company_name TEXT NOT NULL,
                 tally_url TEXT NOT NULL,
                 sales_ledger_name TEXT NOT NULL,
+                sales_ledger_group_name TEXT NOT NULL DEFAULT 'Sales Accounts',
                 cash_ledger_name TEXT NOT NULL,
+                cash_ledger_group_name TEXT NOT NULL DEFAULT 'Cash-in-Hand',
                 upi_fallback_ledger_name TEXT NOT NULL,
                 upi_fallback_group_name TEXT NOT NULL,
+                payment_default_group_name TEXT NOT NULL DEFAULT 'Sundry Debtors',
+                payment_ledger_mappings TEXT,
                 setup_completed_at TEXT,
                 last_sync_at TEXT,
                 last_sync_status TEXT,
@@ -175,9 +179,14 @@ def init_db() -> None:
 
 
 def _migrate_existing_tables(connection: sqlite3.Connection) -> None:
+    _migrate_master_table_uniqueness(connection)
     for table, column, definition in [
         ("stock_items", "company_id", "INTEGER"),
         ("ledgers", "company_id", "INTEGER"),
+        ("companies", "sales_ledger_group_name", "TEXT"),
+        ("companies", "cash_ledger_group_name", "TEXT"),
+        ("companies", "payment_default_group_name", "TEXT"),
+        ("companies", "payment_ledger_mappings", "TEXT"),
         ("vouchers_log", "user_id", "INTEGER"),
         ("vouchers_log", "company_id", "INTEGER"),
         ("vouchers_log", "import_id", "INTEGER"),
@@ -186,12 +195,68 @@ def _migrate_existing_tables(connection: sqlite3.Connection) -> None:
         ("vouchers_log", "source_fingerprint", "TEXT"),
     ]:
         _ensure_column(connection, table, column, definition)
+    connection.execute("UPDATE companies SET sales_ledger_group_name = COALESCE(sales_ledger_group_name, ?) ", (config.SALES_LEDGER_GROUP,))
+    connection.execute("UPDATE companies SET cash_ledger_group_name = COALESCE(cash_ledger_group_name, ?) ", (config.CASH_LEDGER_GROUP,))
+    connection.execute("UPDATE companies SET payment_default_group_name = COALESCE(payment_default_group_name, ?) ", (config.DEFAULT_PAYMENT_LEDGER_GROUP,))
 
 
 def _ensure_column(connection: sqlite3.Connection, table: str, column: str, definition: str) -> None:
     columns = {row["name"] for row in connection.execute(f"PRAGMA table_info({table})")}
     if column not in columns:
         connection.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
+
+
+def _migrate_master_table_uniqueness(connection: sqlite3.Connection) -> None:
+    for table in ("stock_items", "ledgers"):
+        row = connection.execute(
+            "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ?",
+            (table,),
+        ).fetchone()
+        if not row or "name TEXT NOT NULL UNIQUE" not in (row["sql"] or ""):
+            continue
+
+        old_table = f"{table}_legacy_unique"
+        connection.execute(f"ALTER TABLE {table} RENAME TO {old_table}")
+        if table == "stock_items":
+            connection.execute(
+                """
+                CREATE TABLE stock_items (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    company_id INTEGER NOT NULL,
+                    name TEXT NOT NULL,
+                    FOREIGN KEY (company_id) REFERENCES companies(id) ON DELETE CASCADE
+                )
+                """
+            )
+            connection.execute(
+                f"""
+                INSERT OR IGNORE INTO stock_items (company_id, name)
+                SELECT COALESCE(company_id, (SELECT id FROM companies ORDER BY id LIMIT 1)), name
+                FROM {old_table}
+                WHERE COALESCE(company_id, (SELECT id FROM companies ORDER BY id LIMIT 1)) IS NOT NULL
+                """
+            )
+        else:
+            connection.execute(
+                """
+                CREATE TABLE ledgers (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    company_id INTEGER NOT NULL,
+                    name TEXT NOT NULL,
+                    "group" TEXT,
+                    FOREIGN KEY (company_id) REFERENCES companies(id) ON DELETE CASCADE
+                )
+                """
+            )
+            connection.execute(
+                f"""
+                INSERT OR IGNORE INTO ledgers (company_id, name, "group")
+                SELECT COALESCE(company_id, (SELECT id FROM companies ORDER BY id LIMIT 1)), name, "group"
+                FROM {old_table}
+                WHERE COALESCE(company_id, (SELECT id FROM companies ORDER BY id LIMIT 1)) IS NOT NULL
+                """
+            )
+        connection.execute(f"DROP TABLE {old_table}")
 
 
 def create_or_update_user(google_sub: str, email: str, name: str | None = None, picture_url: str | None = None) -> dict[str, Any]:
@@ -275,24 +340,32 @@ def revoke_session(token_hash: str) -> None:
 
 def create_company(user_id: int, data: dict[str, Any]) -> dict[str, Any]:
     now = utc_now()
+    payment_ledger_mappings = data.get("payment_ledger_mappings")
+    if payment_ledger_mappings is not None and not isinstance(payment_ledger_mappings, str):
+        payment_ledger_mappings = json.dumps(payment_ledger_mappings)
     with get_connection() as connection:
         cursor = connection.execute(
             """
             INSERT INTO companies (
-                user_id, company_name, tally_url, sales_ledger_name, cash_ledger_name,
-                upi_fallback_ledger_name, upi_fallback_group_name, setup_completed_at,
-                local_agent_id, updated_at
+                user_id, company_name, tally_url, sales_ledger_name, sales_ledger_group_name,
+                cash_ledger_name, cash_ledger_group_name, upi_fallback_ledger_name,
+                upi_fallback_group_name, payment_default_group_name, payment_ledger_mappings,
+                setup_completed_at, local_agent_id, updated_at
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 user_id,
                 data["company_name"],
                 data.get("tally_url", config.TALLY_URL),
-                data.get("sales_ledger_name", "Sales"),
-                data.get("cash_ledger_name", "Cash"),
-                data.get("upi_fallback_ledger_name", "UPI Sales"),
-                data.get("upi_fallback_group_name", "Sundry Debtors"),
+                data.get("sales_ledger_name", config.SALES_LEDGER_NAME),
+                data.get("sales_ledger_group_name", config.SALES_LEDGER_GROUP),
+                data.get("cash_ledger_name", config.CASH_LEDGER_NAME),
+                data.get("cash_ledger_group_name", config.CASH_LEDGER_GROUP),
+                data.get("upi_fallback_ledger_name", config.UPI_FALLBACK_LEDGER),
+                data.get("upi_fallback_group_name", config.UPI_FALLBACK_GROUP),
+                data.get("payment_default_group_name", config.DEFAULT_PAYMENT_LEDGER_GROUP),
+                payment_ledger_mappings,
                 now,
                 data.get("local_agent_id"),
                 now,
@@ -350,12 +423,18 @@ def update_company(company_id: int, user_id: int, data: dict[str, Any]) -> dict[
         "company_name",
         "tally_url",
         "sales_ledger_name",
+        "sales_ledger_group_name",
         "cash_ledger_name",
+        "cash_ledger_group_name",
         "upi_fallback_ledger_name",
         "upi_fallback_group_name",
+        "payment_default_group_name",
+        "payment_ledger_mappings",
         "local_agent_id",
     }
     updates = {key: value for key, value in data.items() if key in allowed and value is not None}
+    if "payment_ledger_mappings" in updates and not isinstance(updates["payment_ledger_mappings"], str):
+        updates["payment_ledger_mappings"] = json.dumps(updates["payment_ledger_mappings"])
     if not updates:
         return company
     invalidate = any(key in updates for key in {"company_name", "tally_url"})
@@ -815,9 +894,12 @@ def ensure_legacy_company() -> dict[str, Any]:
             "company_name": "Legacy Local Company",
             "tally_url": "http://localhost:9000",
             "sales_ledger_name": "Sales",
+            "sales_ledger_group_name": "Sales Accounts",
             "cash_ledger_name": "Cash",
+            "cash_ledger_group_name": "Cash-in-Hand",
             "upi_fallback_ledger_name": "UPI Sales",
             "upi_fallback_group_name": "Sundry Debtors",
+            "payment_default_group_name": "Sundry Debtors",
         },
     )
 
