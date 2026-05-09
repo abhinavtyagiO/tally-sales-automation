@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import json
+import re
 from typing import Any
 import xml.etree.ElementTree as ET
+from xml.sax.saxutils import escape
 
 import requests
 
@@ -19,19 +21,45 @@ class TallyClient:
         self.timeout = timeout
 
     def _post(self, payload: dict[str, Any]) -> dict[str, Any]:
-        if config.TALLY_TRANSPORT == "json":
-            response = requests.post(self.base_url, json=payload, timeout=self.timeout)
-        else:
-            response = requests.post(
-                self.base_url,
-                data=_dict_to_xml(payload),
-                headers={"Content-Type": "text/xml"},
-                timeout=self.timeout,
-            )
-        response.raise_for_status()
+        try:
+            if config.TALLY_TRANSPORT == "json":
+                response = requests.post(self.base_url, json=payload, timeout=self.timeout)
+            else:
+                response = requests.post(
+                    self.base_url,
+                    data=_dict_to_xml(payload),
+                    headers={"Content-Type": "text/xml"},
+                    timeout=self.timeout,
+                )
+            response.raise_for_status()
+        except requests.RequestException as exc:
+            raise TallyError(f"Tally request failed: {exc}") from exc
         data = _parse_response(response.text)
         self._raise_for_tally_error(data)
         return data
+
+    def _post_xml(self, xml: str) -> dict[str, Any]:
+        try:
+            response = requests.post(
+                self.base_url,
+                data=xml,
+                headers={"Content-Type": "text/xml"},
+                timeout=self.timeout,
+            )
+            response.raise_for_status()
+        except requests.RequestException as exc:
+            raise TallyError(f"Tally request failed: {exc}") from exc
+        data = _parse_response(response.text)
+        self._raise_for_tally_error(data)
+        return data
+
+    def ping(self) -> bool:
+        try:
+            response = requests.get(self.base_url, timeout=self.timeout)
+            response.raise_for_status()
+        except requests.RequestException as exc:
+            raise TallyError(f"Tally request failed: {exc}") from exc
+        return "TallyPrime Server is Running" in response.text or response.status_code == 200
 
     @staticmethod
     def _envelope(tally_request: str, body: dict[str, Any]) -> dict[str, Any]:
@@ -46,11 +74,14 @@ class TallyClient:
     def _raise_for_tally_error(data: dict[str, Any]) -> None:
         status = _find_first(data, "STATUS")
         errors = _find_first(data, "ERRORS")
+        exceptions = _find_first(data, "EXCEPTIONS")
         line_error = _find_first(data, "LINEERROR")
         if str(status).lower() in {"0", "failed", "failure", "error"}:
             raise TallyError(f"Tally request failed: {data}")
         if errors not in (None, "", 0, "0"):
             raise TallyError(f"Tally returned errors: {data}")
+        if exceptions not in (None, "", 0, "0"):
+            raise TallyError(f"Tally returned exceptions: {data}")
         if line_error:
             raise TallyError(f"Tally line error: {line_error}")
 
@@ -104,22 +135,42 @@ class TallyClient:
         ledgers = _extract_collection(data, "Ledger")
         return [
             {
-                "name": _get_ci(item, "Name"),
-                "group": _get_ci(item, "Parent") or _get_ci(item, "Group"),
+                "name": _text_value(_get_ci(item, "Name") or _find_first(item, "Name")),
+                "group": _text_value(_get_ci(item, "Parent") or _get_ci(item, "Group")),
             }
             for item in ledgers
-            if _get_ci(item, "Name")
+            if _text_value(_get_ci(item, "Name") or _find_first(item, "Name"))
         ]
 
     def get_all_stock_items(self, company_name: str | None = None) -> list[str]:
         data = self.export_collection("StockItem", company_name) if company_name else self.export_data("Stock Items")
         items = _extract_collection(data, "StockItem")
-        return [str(_get_ci(item, "Name")) for item in items if _get_ci(item, "Name")]
+        return [
+            name
+            for item in items
+            if (name := _text_value(_get_ci(item, "Name") or _find_first(item, "Name")))
+        ]
 
     def get_company_name(self) -> str | None:
         data = self.export_data("Company")
         company = _find_first(data, "CompanyName") or _find_first(data, "Name")
         return str(company) if company else None
+
+    def get_companies(self) -> list[str]:
+        try:
+            data = self.export_data("Company")
+        except TallyError:
+            return []
+        companies = _extract_collection(data, "Company")
+        names = [
+            str(_get_ci(item, "Name") or _get_ci(item, "CompanyName"))
+            for item in companies
+            if _get_ci(item, "Name") or _get_ci(item, "CompanyName")
+        ]
+        if names:
+            return sorted(set(names), key=str.lower)
+        company = self.get_company_name()
+        return [company] if company else []
 
     def create_ledger(self, name: str, group_name: str, company_name: str | None = None) -> dict[str, Any]:
         data = {
@@ -136,11 +187,7 @@ class TallyClient:
         )
 
     def create_sales_voucher(self, voucher: dict[str, Any], company_name: str | None = None) -> dict[str, Any]:
-        clean_voucher = {key: value for key, value in voucher.items() if key != "Source"}
-        data = {"Voucher": clean_voucher}
-        if company_name:
-            data["StaticVariables"] = {"SVCurrentCompany": company_name}
-        return self.import_data("Voucher", data)
+        return self._post_xml(_sales_voucher_xml(voucher, company_name))
 
 
 def _find_first(value: Any, key: str) -> Any:
@@ -167,9 +214,10 @@ def _extract_collection(data: dict[str, Any], entity_name: str) -> list[dict[str
             for key, nested in value.items():
                 if key.lower() == entity_name.lower():
                     if isinstance(nested, list):
-                        matches.extend(item for item in nested if isinstance(item, dict))
+                        matches.extend(_unwrap_entity(item, entity_name) for item in nested if isinstance(item, dict))
                     elif isinstance(nested, dict):
-                        matches.append(nested)
+                        matches.append(_unwrap_entity(nested, entity_name))
+                    continue
                 walk(nested)
         elif isinstance(value, list):
             for item in value:
@@ -179,6 +227,11 @@ def _extract_collection(data: dict[str, Any], entity_name: str) -> list[dict[str
     return matches
 
 
+def _unwrap_entity(value: dict[str, Any], entity_name: str) -> dict[str, Any]:
+    nested = _get_ci(value, entity_name)
+    return nested if isinstance(nested, dict) else value
+
+
 def _get_ci(value: dict[str, Any], key: str) -> Any:
     for current_key, current_value in value.items():
         if current_key.lower() == key.lower():
@@ -186,24 +239,58 @@ def _get_ci(value: dict[str, Any], key: str) -> Any:
     return None
 
 
+def _text_value(value: Any) -> str | None:
+    if value in (None, ""):
+        return None
+    if isinstance(value, dict):
+        nested = _get_ci(value, "Value") or _get_ci(value, "Name")
+        return _text_value(nested)
+    if isinstance(value, list):
+        for item in value:
+            text = _text_value(item)
+            if text:
+                return text
+        return None
+    return str(value)
+
+
 def _parse_response(text: str) -> dict[str, Any]:
     try:
         return json.loads(text)
     except ValueError:
         pass
+    text = _sanitize_xml(text)
     try:
         root = ET.fromstring(text)
     except ET.ParseError as exc:
         raise TallyError(f"Tally returned unsupported response: {text[:500]}") from exc
-    return _xml_element_to_dict(root)
+    parsed = _xml_element_to_dict(root)
+    if not isinstance(parsed, dict):
+        raise TallyError(f"Tally request failed: {parsed}")
+    return parsed
+
+
+def _sanitize_xml(text: str) -> str:
+    text = re.sub(r"&#(?:0*4|x0*4);", "", text, flags=re.IGNORECASE)
+    return "".join(
+        char
+        for char in text
+        if char in {"\t", "\n", "\r"} or ord(char) >= 0x20
+    )
 
 
 def _xml_element_to_dict(element: ET.Element) -> dict[str, Any] | str:
     children = list(element)
     if not children:
-        return (element.text or "").strip()
+        text = (element.text or "").strip()
+        if element.attrib:
+            result = {key: value for key, value in element.attrib.items()}
+            if text:
+                result["VALUE"] = text
+            return result
+        return text
 
-    result: dict[str, Any] = {}
+    result: dict[str, Any] = {key: value for key, value in element.attrib.items()}
     for child in children:
         child_value = _xml_element_to_dict(child)
         if child.tag in result:
@@ -237,3 +324,97 @@ def _append_xml_value(parent: ET.Element, value: Any) -> None:
             _append_xml_value(child, item)
     else:
         parent.text = "" if value is None else str(value)
+
+
+def _sales_voucher_xml(voucher: dict[str, Any], company_name: str | None = None) -> str:
+    voucher_date = str(voucher["Date"]).replace("-", "")
+    voucher_type = _xml_text(voucher.get("VoucherTypeName", "Sales"))
+    party_ledger = _xml_text(voucher["PartyLedgerName"])
+    source = voucher.get("Source") or {}
+    voucher_number = _xml_text(f"TSA-{source.get('import_id', 'manual')}-{source.get('import_row_id', '1')}")
+    company_xml = ""
+    if company_name:
+        company_xml = f"<SVCURRENTCOMPANY>{_xml_text(company_name)}</SVCURRENTCOMPANY>"
+
+    party_entry = _ledger_entry_xml(voucher["PartyLedgerName"], voucher["LedgerEntries"][1]["Amount"], is_party=True)
+    sales_entry = _ledger_entry_xml(voucher["LedgerEntries"][0]["LedgerName"], voucher["LedgerEntries"][0]["Amount"])
+
+    return f"""<ENVELOPE>
+  <HEADER>
+    <VERSION>1</VERSION>
+    <TALLYREQUEST>Import</TALLYREQUEST>
+    <TYPE>Data</TYPE>
+    <ID>Vouchers</ID>
+  </HEADER>
+  <BODY>
+    <DESC>
+        <STATICVARIABLES>
+          {company_xml}
+          <IMPORTDUPS>@@DUPCOMBINE</IMPORTDUPS>
+        </STATICVARIABLES>
+    </DESC>
+    <DATA>
+        <TALLYMESSAGE xmlns:UDF="TallyUDF">
+          <VOUCHER VCHTYPE="{voucher_type}" ACTION="Create" OBJVIEW="Accounting Voucher View">
+            <DATE>{voucher_date}</DATE>
+            <EFFECTIVEDATE>{voucher_date}</EFFECTIVEDATE>
+            <VOUCHERTYPENAME>{voucher_type}</VOUCHERTYPENAME>
+            <VOUCHERNUMBER>{voucher_number}</VOUCHERNUMBER>
+            <PARTYLEDGERNAME>{party_ledger}</PARTYLEDGERNAME>
+            <PERSISTEDVIEW>Accounting Voucher View</PERSISTEDVIEW>
+            <ISINVOICE>No</ISINVOICE>
+            {party_entry}
+            {sales_entry}
+          </VOUCHER>
+        </TALLYMESSAGE>
+    </DATA>
+  </BODY>
+</ENVELOPE>"""
+
+
+def _inventory_entry_xml(item: dict[str, Any], sales_ledger_name: str) -> str:
+    stock_item = _xml_text(item["StockItemName"])
+    amount = _xml_amount(item["Amount"])
+    rate = f"{_xml_amount(item.get('Rate', item['Amount']))}/Nos"
+    quantity = _xml_quantity(item.get("Quantity", 1))
+    sales_ledger = _xml_text(sales_ledger_name)
+    return f"""<ALLINVENTORYENTRIES.LIST>
+              <STOCKITEMNAME>{stock_item}</STOCKITEMNAME>
+              <ISDEEMEDPOSITIVE>No</ISDEEMEDPOSITIVE>
+              <RATE>{rate}</RATE>
+              <AMOUNT>{amount}</AMOUNT>
+              <ACTUALQTY>{quantity}</ACTUALQTY>
+              <BILLEDQTY>{quantity}</BILLEDQTY>
+              <ACCOUNTINGALLOCATIONS.LIST>
+                <LEDGERNAME>{sales_ledger}</LEDGERNAME>
+                <ISDEEMEDPOSITIVE>No</ISDEEMEDPOSITIVE>
+                <AMOUNT>{amount}</AMOUNT>
+              </ACCOUNTINGALLOCATIONS.LIST>
+            </ALLINVENTORYENTRIES.LIST>"""
+
+
+def _ledger_entry_xml(ledger_name: str, amount: Any, is_party: bool = False) -> str:
+    amount_text = _xml_amount(amount)
+    deemed_positive = "Yes" if float(amount) < 0 else "No"
+    party_xml = "<ISPARTYLEDGER>Yes</ISPARTYLEDGER>" if is_party else ""
+    return f"""<LEDGERENTRIES.LIST>
+              <LEDGERNAME>{_xml_text(ledger_name)}</LEDGERNAME>
+              <ISDEEMEDPOSITIVE>{deemed_positive}</ISDEEMEDPOSITIVE>
+              <ISLASTDEEMEDPOSITIVE>{deemed_positive}</ISLASTDEEMEDPOSITIVE>
+              {party_xml}
+              <AMOUNT>{amount_text}</AMOUNT>
+            </LEDGERENTRIES.LIST>"""
+
+
+def _xml_text(value: Any) -> str:
+    return escape(str(value), {'"': "&quot;", "'": "&apos;"})
+
+
+def _xml_amount(value: Any) -> str:
+    return f"{float(value):.2f}"
+
+
+def _xml_quantity(value: Any) -> str:
+    quantity = float(value)
+    quantity_text = str(int(quantity)) if quantity.is_integer() else str(quantity)
+    return f"{quantity_text} Nos"

@@ -7,6 +7,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable, Optional
 
+from backend import config
+
 
 BASE_DIR = Path(__file__).resolve().parents[1]
 DB_PATH = BASE_DIR / "tally_sales.db"
@@ -286,7 +288,7 @@ def create_company(user_id: int, data: dict[str, Any]) -> dict[str, Any]:
             (
                 user_id,
                 data["company_name"],
-                data.get("tally_url", "http://localhost:9000"),
+                data.get("tally_url", config.TALLY_URL),
                 data.get("sales_ledger_name", "Sales"),
                 data.get("cash_ledger_name", "Cash"),
                 data.get("upi_fallback_ledger_name", "UPI Sales"),
@@ -299,12 +301,25 @@ def create_company(user_id: int, data: dict[str, Any]) -> dict[str, Any]:
         return get_company(cursor.lastrowid, user_id=user_id, connection=connection)
 
 
+def delete_company(company_id: int, user_id: int) -> bool:
+    with get_connection() as connection:
+        cursor = connection.execute("DELETE FROM companies WHERE id = ? AND user_id = ?", (company_id, user_id))
+        return cursor.rowcount > 0
+
+
 def list_companies(user_id: int) -> list[dict[str, Any]]:
     with get_connection() as connection:
         return [
             dict(row)
             for row in connection.execute(
-                "SELECT * FROM companies WHERE user_id = ? ORDER BY lower(company_name)",
+                """
+                SELECT * FROM companies
+                WHERE user_id = ?
+                ORDER BY
+                    CASE WHEN last_selected_at IS NULL THEN 1 ELSE 0 END,
+                    last_selected_at DESC,
+                    lower(company_name)
+                """,
                 (user_id,),
             )
         ]
@@ -461,6 +476,26 @@ def get_local_agent(agent_id: int, user_id: int | None = None, connection: sqlit
     finally:
         if close:
             connection.close()
+
+
+def get_active_local_agent(user_id: int) -> dict[str, Any] | None:
+    with get_connection() as connection:
+        row = connection.execute(
+            """
+            SELECT * FROM local_agents
+            WHERE user_id = ?
+              AND revoked_at IS NULL
+              AND pairing_status = 'paired'
+              AND base_url IS NOT NULL
+            ORDER BY
+              CASE WHEN last_seen_at IS NULL THEN 1 ELSE 0 END,
+              last_seen_at DESC,
+              id DESC
+            LIMIT 1
+            """,
+            (user_id,),
+        ).fetchone()
+        return dict(row) if row else None
 
 
 def replace_stock_items(names: Iterable[str], company_id: int | None = None) -> None:

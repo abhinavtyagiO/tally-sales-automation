@@ -1,21 +1,26 @@
 from __future__ import annotations
 
 from datetime import date
+import logging
+import sqlite3
 from typing import Any, Optional
 
 from fastapi import APIRouter, Depends, File, HTTPException, Request, Response, UploadFile
 from pydantic import BaseModel, Field
 
+from backend import config
 from backend.db import database
 from backend.services import auth_service, local_agent_service
 from backend.services.company_service import company_has_online_agent, require_company
 from backend.services.excel_parser import ExcelParseError, parse_excel
 from backend.services.sync_service import get_cache_snapshot, get_company_cache_snapshot, sync_from_tally
 from backend.services.tally_client import TallyClient, TallyError
+from backend.services.tally_status_service import ensure_tally_reachable, get_tally_status, list_tally_companies
 from backend.services.voucher_builder import VoucherBuildError, build_vouchers, validate_voucher
 
 
 router = APIRouter()
+logger = logging.getLogger(__name__)
 
 
 class AuthRequest(BaseModel):
@@ -24,7 +29,7 @@ class AuthRequest(BaseModel):
 
 class CompanyRequest(BaseModel):
     company_name: str
-    tally_url: str = "http://localhost:9000"
+    tally_url: str = config.TALLY_URL
     sales_ledger_name: str = "Sales"
     cash_ledger_name: str = "Cash"
     upi_fallback_ledger_name: str = "UPI Sales"
@@ -81,6 +86,7 @@ class CommitRequest(BaseModel):
 
 @router.post("/auth/google")
 def google_login(request: AuthRequest, response: Response) -> dict[str, Any]:
+    logger.info("auth.login.request_received")
     user = auth_service.create_login_session(request.id_token, response)
     return {"user": user}
 
@@ -102,16 +108,59 @@ def auth_logout(
 
 @router.get("/companies")
 def list_companies(user: dict[str, Any] = Depends(auth_service.get_current_user)) -> dict[str, Any]:
-    return {"companies": database.list_companies(user["id"])}
+    companies = database.list_companies(user["id"])
+    return {
+        "companies": companies,
+        "active_company_id": _active_company_id(companies),
+    }
 
 
 @router.post("/companies")
 def create_company(request: CompanyRequest, user: dict[str, Any] = Depends(auth_service.get_current_user)) -> dict[str, Any]:
+    company_name = request.company_name.strip()
+    logger.info("company.create.start user_id=%s company_name=%s", user["id"], company_name)
+    if not company_name:
+        raise HTTPException(status_code=400, detail="Company name is required")
+    if any(company["company_name"].lower() == company_name.lower() for company in database.list_companies(user["id"])):
+        raise HTTPException(status_code=409, detail="This company is already added")
+
+    agent = _active_tally_agent(user["id"])
+    _validate_company_in_tally(agent, company_name, request.tally_url)
+
     try:
-        company = database.create_company(user["id"], _model_to_dict(request))
+        data = _model_to_dict(request)
+        data["company_name"] = company_name
+        data["tally_url"] = request.tally_url
+        data["local_agent_id"] = agent["id"]
+        company = database.create_company(user["id"], data)
+        selected = database.select_company(company["id"], user["id"])
+        try:
+            sync_result = sync_from_tally(company=selected, agent=agent)
+        except TallyError:
+            database.delete_company(company["id"], user["id"])
+            raise
+        company = database.get_company(company["id"], user_id=user["id"])
+        logger.info("company.create.success user_id=%s company_id=%s company_name=%s", user["id"], company["id"], company_name)
+    except sqlite3.IntegrityError as exc:
+        logger.warning("company.create.failed user_id=%s company_name=%s reason=duplicate", user["id"], company_name)
+        raise HTTPException(status_code=409, detail="This company is already added") from exc
+    except TallyError as exc:
+        logger.warning("company.create.failed user_id=%s company_name=%s error=%r", user["id"], company_name, exc)
+        raise _friendly_tally_exception(exc) from exc
     except Exception as exc:
+        logger.exception("company.create.failed user_id=%s company_name=%s", user["id"], company_name)
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-    return {"company": company}
+    return {"company": company, "sync": sync_result}
+
+
+@router.get("/tally/status")
+def tally_status(user: dict[str, Any] = Depends(auth_service.get_current_user)) -> dict[str, Any]:
+    return get_tally_status(user["id"])
+
+
+@router.get("/tally/companies")
+def tally_companies(user: dict[str, Any] = Depends(auth_service.get_current_user)) -> dict[str, Any]:
+    return list_tally_companies(user["id"])
 
 
 @router.get("/companies/{company_id}")
@@ -197,13 +246,24 @@ async def upload_company_excel(
     file: UploadFile = File(...),
     user: dict[str, Any] = Depends(auth_service.get_current_user),
 ) -> dict[str, Any]:
-    require_company(user["id"], company_id)
+    company = require_company(user["id"], company_id)
+    agent = _active_tally_agent(user["id"])
+    try:
+        logger.info("import.upload.sync_start user_id=%s company_id=%s filename=%s", user["id"], company_id, file.filename)
+        sync_result = sync_from_tally(company=company, agent=agent)
+    except TallyError as exc:
+        logger.warning("import.upload.sync_failed user_id=%s company_id=%s filename=%s error=%r", user["id"], company_id, file.filename, exc)
+        raise _friendly_tally_exception(exc) from exc
+    company = database.get_company(company_id, user_id=user["id"])
     rows = await _parse_upload(file)
     import_record = database.create_import(user["id"], company_id, file.filename, rows)
+    processed = _process_import_rows(company, import_record["id"], user)
+    logger.info("import.upload.success user_id=%s company_id=%s import_id=%s rows=%s", user["id"], company_id, import_record["id"], len(rows))
     return {
-        "import": import_record,
-        "rows": database.list_import_rows(import_record["id"], company_id),
+        "import": processed["import"],
         "count": len(rows),
+        "sync": sync_result,
+        "rows": processed["rows"],
     }
 
 
@@ -212,19 +272,7 @@ def process_import(company_id: int, import_id: int, user: dict[str, Any] = Depen
     company = require_company(user["id"], company_id)
     if not database.get_import(import_id, user["id"], company_id):
         raise HTTPException(status_code=404, detail="Import not found")
-    rows = database.list_import_rows(import_id, company_id)
-    result = build_vouchers([_row_to_sale(row) for row in rows], ensure_ledgers=False, company=company, user_id=user["id"])
-    vouchers_by_row = {voucher["Source"]["import_row_id"]: voucher for voucher in result.vouchers}
-    errors_by_row = {rows[item["row"]]["id"]: item["error"] for item in result.errors if item.get("row") is not None and item["row"] < len(rows)}
-    for row in rows:
-        voucher = vouchers_by_row.get(row["id"])
-        error = errors_by_row.get(row["id"])
-        database.update_import_row_validation(row["id"], "valid" if voucher else "invalid", error, voucher)
-    database.update_import_counts(import_id)
-    return {
-        "import": database.get_import(import_id, user["id"], company_id),
-        "rows": database.list_import_rows(import_id, company_id),
-    }
+    return _process_import_rows(company, import_id, user)
 
 
 @router.post("/companies/{company_id}/imports/{import_id}/commit")
@@ -236,6 +284,11 @@ def commit_import(
 ) -> dict[str, Any]:
     company = require_company(user["id"], company_id)
     agent = company_has_online_agent(company)
+    try:
+        ensure_tally_reachable(user["id"])
+    except TallyError as exc:
+        logger.warning("import.commit.tally_unreachable user_id=%s company_id=%s import_id=%s error=%r", user["id"], company_id, import_id, exc)
+        raise _friendly_tally_exception(exc) from exc
     if not database.get_import(import_id, user["id"], company_id):
         raise HTTPException(status_code=404, detail="Import not found")
     rows = [
@@ -247,6 +300,7 @@ def commit_import(
     ]
     result = build_vouchers([_row_to_sale(row) for row in rows], ensure_ledgers=True, company=company, user_id=user["id"])
     results: list[dict[str, Any]] = []
+    logger.info("import.commit.start user_id=%s company_id=%s import_id=%s row_count=%s", user["id"], company_id, import_id, len(rows))
     for voucher in result.vouchers:
         import_row_id = voucher["Source"]["import_row_id"]
         try:
@@ -259,16 +313,26 @@ def commit_import(
             database.log_voucher(voucher, response, "success", source=voucher.get("Source"))
             database.update_import_row_commit(import_row_id, "success", None, response)
             results.append({"import_row_id": import_row_id, "status": "success", "response": response})
+            logger.info("import.commit.row_success user_id=%s company_id=%s import_id=%s row_id=%s", user["id"], company_id, import_id, import_row_id)
         except (TallyError, VoucherBuildError, ValueError) as exc:
             database.log_voucher(voucher, {"error": str(exc)}, "failed", source=voucher.get("Source"))
             database.update_import_row_commit(import_row_id, "failed", str(exc))
             results.append({"import_row_id": import_row_id, "status": "failed", "error": str(exc)})
+            logger.warning("import.commit.row_failed user_id=%s company_id=%s import_id=%s row_id=%s error=%r", user["id"], company_id, import_id, import_row_id, exc)
     for error in result.errors:
         row = rows[error["row"]]
         database.update_import_row_commit(row["id"], "failed", error["error"])
         results.append({"import_row_id": row["id"], "status": "failed", "error": error["error"]})
     if rows:
         database.mark_import_completed(import_id)
+    logger.info(
+        "import.commit.completed user_id=%s company_id=%s import_id=%s success_count=%s failed_count=%s",
+        user["id"],
+        company_id,
+        import_id,
+        sum(1 for item in results if item["status"] == "success"),
+        sum(1 for item in results if item["status"] == "failed"),
+    )
     return {
         "results": results,
         "rows": database.list_import_rows(import_id, company_id),
@@ -394,6 +458,89 @@ def _row_to_sale(row: dict[str, Any]) -> dict[str, Any]:
         "import_id": row["import_id"],
         "import_row_id": row["id"],
     }
+
+
+def _process_import_rows(company: dict[str, Any], import_id: int, user: dict[str, Any]) -> dict[str, Any]:
+    rows = database.list_import_rows(import_id, company["id"])
+    result = build_vouchers([_row_to_sale(row) for row in rows], ensure_ledgers=False, company=company, user_id=user["id"])
+    vouchers_by_row = {voucher["Source"]["import_row_id"]: voucher for voucher in result.vouchers}
+    errors_by_row = {
+        rows[item["row"]]["id"]: item["error"]
+        for item in result.errors
+        if item.get("row") is not None and item["row"] < len(rows)
+    }
+    for row in rows:
+        voucher = vouchers_by_row.get(row["id"])
+        error = errors_by_row.get(row["id"])
+        database.update_import_row_validation(row["id"], "valid" if voucher else "invalid", error, voucher)
+    database.update_import_counts(import_id)
+    return {
+        "import": database.get_import(import_id, user["id"], company["id"]),
+        "rows": database.list_import_rows(import_id, company["id"]),
+    }
+
+
+def _active_company_id(companies: list[dict[str, Any]]) -> int | None:
+    selected = next((company for company in companies if company.get("last_selected_at")), None)
+    selected = selected or (companies[0] if companies else None)
+    return selected["id"] if selected else None
+
+
+def _active_tally_agent(user_id: int) -> dict[str, Any]:
+    try:
+        return ensure_tally_reachable(user_id)
+    except TallyError as exc:
+        logger.warning("tally.active_agent.failed user_id=%s error=%r", user_id, exc)
+        raise _friendly_tally_exception(exc) from exc
+
+
+def _friendly_tally_exception(exc: TallyError) -> HTTPException:
+    message = str(exc)
+    lowered = message.lower()
+    if "not available" in lowered or "no base_url" in lowered or "connection refused" in lowered:
+        return HTTPException(
+            status_code=503,
+            detail="Can't connect to Tally right now. Please try again or contact support.",
+        )
+    if "tally request failed" in lowered or "bad gateway" in lowered:
+        return HTTPException(
+            status_code=503,
+            detail="Can't connect to Tally right now. Please try again or contact support.",
+        )
+    return HTTPException(status_code=502, detail="Tally action failed. Please try again or contact support.")
+
+
+def _ensure_local_agent(user_id: int, base_url: str) -> dict[str, Any]:
+    try:
+        pairing = local_agent_service.create_pairing_token(user_id, "Local Tally machine", base_url)
+        return local_agent_service.pair_agent(pairing["pairing_token"], "Local Tally machine", base_url)
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail=f"Local agent setup failed: {exc}") from exc
+
+
+def _validate_company_in_tally(agent: dict[str, Any], company_name: str, tally_url: str) -> None:
+    try:
+        result = local_agent_service.dispatch_tally_operation(
+            agent,
+            "export_collection",
+            {"collection_id": "Ledger", "company_name": company_name, "tally_url": tally_url},
+        )
+    except TallyError as exc:
+        message = str(exc)
+        logger.warning("company.validate_in_tally.failed company_name=%s tally_url=%s error=%r", company_name, tally_url, exc)
+        if "Tally request failed" in message or "Bad Gateway" in message:
+            raise HTTPException(status_code=503, detail="Tally is unreachable. Make sure Tally is open and listening on the configured URL.") from exc
+        if "Failed to establish a new connection" in message or "Connection refused" in message:
+            raise HTTPException(status_code=503, detail="Local agent is unreachable") from exc
+        raise HTTPException(status_code=502, detail=message) from exc
+
+    ledgers = result.get("ledgers") or []
+    if not ledgers:
+        logger.warning("company.validate_in_tally.not_found company_name=%s tally_url=%s", company_name, tally_url)
+        raise HTTPException(status_code=404, detail="Company not found in Tally or no ledgers were returned")
+    logger.info("company.validate_in_tally.success company_name=%s ledger_count=%s", company_name, len(ledgers))
 
 
 def _model_to_dict(model: BaseModel) -> dict[str, Any]:

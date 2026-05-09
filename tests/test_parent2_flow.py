@@ -9,10 +9,12 @@ from unittest.mock import patch
 import pandas as pd
 from fastapi import HTTPException, Response
 
+from backend import config
 from backend.api import routes
 from backend.db import database
 from backend.services import auth_service, local_agent_service
 from backend.services.sync_service import sync_from_tally
+from backend.services.tally_client import TallyError
 
 
 class Parent2FlowTests(unittest.TestCase):
@@ -21,6 +23,9 @@ class Parent2FlowTests(unittest.TestCase):
         self.addCleanup(self.temp_dir.cleanup)
         database.DB_PATH = Path(self.temp_dir.name) / "test.db"
         database.init_db()
+        self.original_allow_dev_auth = config.ALLOW_DEV_AUTH
+        config.ALLOW_DEV_AUTH = True
+        self.addCleanup(lambda: setattr(config, "ALLOW_DEV_AUTH", self.original_allow_dev_auth))
         self.user = database.create_or_update_user("user-1", "owner@example.test", "Owner")
         self.other_user = database.create_or_update_user("user-2", "other@example.test", "Other")
 
@@ -36,6 +41,23 @@ class Parent2FlowTests(unittest.TestCase):
                 "upi_fallback_group_name": "Sundry Debtors",
             },
         )
+
+    def make_agent(self) -> dict:
+        database.create_pairing_token(self.user["id"], "Office PC", "hash", base_url="http://localhost:9100")
+        return database.pair_local_agent("hash", base_url="http://localhost:9100")
+
+    def fake_master_dispatch(self, agent_arg, operation, payload):
+        if operation == "health_check":
+            return {"status": "connected"}
+        if operation == "list_companies":
+            return {"companies": ["Bhrama Enterprises", "Company B"]}
+        if operation == "export_collection" and payload["collection_id"] == "Ledger":
+            return {"ledgers": [{"name": "Sales", "group": "Sales Accounts"}, {"name": "Cash", "group": "Cash-in-Hand"}]}
+        if operation == "export_collection" and payload["collection_id"] == "StockItem":
+            return {"stock_items": ["2.75-18 NGP"]}
+        if operation == "create_sales_voucher":
+            return {"STATUS": "1"}
+        return {}
 
     def seed_company_masters(self, company: dict, include_upi: bool = True) -> None:
         ledgers = [
@@ -68,6 +90,35 @@ class Parent2FlowTests(unittest.TestCase):
         cookie = response.headers["set-cookie"]
         self.assertIn(auth_service.SESSION_COOKIE, cookie)
 
+    def test_dev_auth_is_rejected_unless_enabled(self) -> None:
+        config.ALLOW_DEV_AUTH = False
+        with self.assertRaises(HTTPException) as raised:
+            auth_service.create_login_session("test:new@example.test", Response())
+        self.assertEqual(raised.exception.status_code, 401)
+
+    def test_logout_accepts_route_call_without_cookie_dependency_default(self) -> None:
+        class Request:
+            cookies: dict[str, str] = {}
+            headers: dict[str, str] = {}
+
+        response = Response()
+        auth_service.logout(Request(), response)
+
+        self.assertIn(auth_service.SESSION_COOKIE, response.headers["set-cookie"])
+
+    def test_logout_revokes_cookie_session(self) -> None:
+        response = Response()
+        auth_service.create_login_session("test:logout@example.test", response)
+        cookie = response.headers["set-cookie"].split(";", 1)[0].split("=", 1)[1]
+
+        class Request:
+            cookies = {auth_service.SESSION_COOKIE: cookie}
+            headers: dict[str, str] = {}
+
+        auth_service.logout(Request(), Response())
+
+        self.assertIsNone(database.get_session_by_hash(auth_service.hash_token(cookie)))
+
     def test_company_scoped_masters_allow_same_names(self) -> None:
         first = self.make_company(company_name="Company A")
         second = self.make_company(company_name="Company B")
@@ -98,6 +149,59 @@ class Parent2FlowTests(unittest.TestCase):
         self.assertEqual(updated["last_sync_status"], "invalidated")
         self.assertEqual(database.list_ledgers(company["id"]), [])
 
+    def test_create_company_validates_tally_before_persisting(self) -> None:
+        self.make_agent()
+        with patch(
+            "backend.services.local_agent_service.dispatch_tally_operation",
+            side_effect=self.fake_master_dispatch,
+        ) as dispatch:
+            created = routes.create_company(
+                routes.CompanyRequest(company_name="Bhrama Enterprises"),
+                user=self.user,
+            )
+
+        self.assertEqual(created["company"]["company_name"], "Bhrama Enterprises")
+        self.assertIsNotNone(created["company"]["local_agent_id"])
+        self.assertEqual(created["sync"]["last_sync_status"], "success")
+        self.assertEqual(routes.list_companies(user=self.user)["active_company_id"], created["company"]["id"])
+        self.assertTrue(any(call.args[2].get("company_name") == "Bhrama Enterprises" for call in dispatch.call_args_list if call.args[1] == "export_collection"))
+
+        with self.assertRaises(HTTPException) as raised:
+            routes.create_company(routes.CompanyRequest(company_name="bhrama enterprises"), user=self.user)
+        self.assertEqual(raised.exception.status_code, 409)
+
+    def test_create_company_blocks_missing_or_unreachable_tally_company(self) -> None:
+        self.make_agent()
+
+        def missing_company(agent_arg, operation, payload):
+            if operation == "health_check":
+                return {"status": "connected"}
+            return {"ledgers": []}
+
+        with patch("backend.services.local_agent_service.dispatch_tally_operation", side_effect=missing_company):
+            with self.assertRaises(HTTPException) as missing:
+                routes.create_company(routes.CompanyRequest(company_name="Missing Company"), user=self.user)
+        self.assertEqual(missing.exception.status_code, 404)
+        self.assertEqual(database.list_companies(self.user["id"]), [])
+
+        with patch(
+            "backend.services.local_agent_service.dispatch_tally_operation",
+            side_effect=TallyError("Local agent request failed: Tally request failed: connection refused"),
+        ):
+            with self.assertRaises(HTTPException) as unreachable:
+                routes.create_company(routes.CompanyRequest(company_name="Bhrama Enterprises"), user=self.user)
+        self.assertEqual(unreachable.exception.status_code, 503)
+        self.assertIn("Can't connect to Tally", unreachable.exception.detail)
+
+    def test_tally_status_and_company_discovery_are_backend_owned(self) -> None:
+        self.make_agent()
+        with patch("backend.services.local_agent_service.dispatch_tally_operation", side_effect=self.fake_master_dispatch):
+            status = routes.tally_status(user=self.user)
+            companies = routes.tally_companies(user=self.user)
+
+        self.assertEqual(status["status"], "connected")
+        self.assertEqual(companies["companies"], ["Bhrama Enterprises", "Company B"])
+
     def test_local_agent_pairing_heartbeat_and_revocation(self) -> None:
         company = self.make_company()
 
@@ -120,8 +224,7 @@ class Parent2FlowTests(unittest.TestCase):
 
     def test_company_sync_uses_local_agent_and_company_scope(self) -> None:
         company = self.make_company()
-        agent = database.create_pairing_token(self.user["id"], "Office PC", "hash", base_url="http://localhost:9100")
-        agent = database.pair_local_agent("hash", base_url="http://localhost:9100")
+        agent = self.make_agent()
         database.update_company(company["id"], self.user["id"], {"local_agent_id": agent["id"]})
 
         def fake_dispatch(agent_arg, operation, payload):
@@ -150,14 +253,13 @@ class Parent2FlowTests(unittest.TestCase):
 
     def test_commit_import_rows_through_local_agent_and_blocks_duplicates(self) -> None:
         company = self.make_company()
-        agent = database.create_pairing_token(self.user["id"], "Office PC", "hash", base_url="http://localhost:9100")
-        agent = database.pair_local_agent("hash", base_url="http://localhost:9100")
+        agent = self.make_agent()
         database.update_company(company["id"], self.user["id"], {"local_agent_id": agent["id"]})
         self.seed_company_masters(company)
         import_record = self.upload_rows(company)
         routes.process_import(company["id"], import_record["id"], user=self.user)
 
-        with patch("backend.services.local_agent_service.dispatch_tally_operation", return_value={"STATUS": "1"}):
+        with patch("backend.services.local_agent_service.dispatch_tally_operation", side_effect=self.fake_master_dispatch):
             first = routes.commit_import(company["id"], import_record["id"], routes.CommitRequest(), user=self.user)
             second = routes.commit_import(company["id"], import_record["id"], routes.CommitRequest(), user=self.user)
 
@@ -167,6 +269,36 @@ class Parent2FlowTests(unittest.TestCase):
         self.assertEqual(logs[0]["user_id"], self.user["id"])
         self.assertEqual(logs[0]["company_id"], company["id"])
         self.assertEqual(logs[0]["import_id"], import_record["id"])
+
+    def test_duplicate_looking_rows_are_allowed_in_import_path(self) -> None:
+        company = self.make_company()
+        agent = self.make_agent()
+        database.update_company(company["id"], self.user["id"], {"local_agent_id": agent["id"]})
+        self.seed_company_masters(company)
+        rows = [
+            {
+                "product_name": "2.75-18 NGP",
+                "price": 1600,
+                "payment_mode": "Cash",
+                "voucher_date": "2026-05-04",
+                "source_row_id": "2",
+            },
+            {
+                "product_name": "2.75-18 NGP",
+                "price": 1600,
+                "payment_mode": "Cash",
+                "voucher_date": "2026-05-04",
+                "source_row_id": "3",
+            },
+        ]
+        import_record = database.create_import(self.user["id"], company["id"], "sales.xlsx", rows)
+        processed = routes.process_import(company["id"], import_record["id"], user=self.user)
+
+        with patch("backend.services.local_agent_service.dispatch_tally_operation", side_effect=self.fake_master_dispatch):
+            committed = routes.commit_import(company["id"], import_record["id"], routes.CommitRequest(), user=self.user)
+
+        self.assertEqual(processed["import"]["valid_count"], 2)
+        self.assertEqual(committed["success_count"], 2)
 
     def test_excel_upload_contract_still_requires_voucher_date(self) -> None:
         buffer = BytesIO()

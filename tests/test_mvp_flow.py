@@ -8,6 +8,7 @@ import unittest
 from unittest.mock import patch
 
 import pandas as pd
+import requests
 from fastapi import HTTPException
 
 from backend.api import routes
@@ -200,7 +201,7 @@ class MvpFlowTests(unittest.TestCase):
         logs = database.list_voucher_logs()
         self.assertTrue(any(log["source_fingerprint"] for log in logs if log["status"] == "success"))
 
-    def test_commit_rejects_duplicate_source_rows(self) -> None:
+    def test_commit_allows_duplicate_source_rows(self) -> None:
         self.seed_cache()
         fake = FakeTally()
         request = routes.CommitRequest(
@@ -221,8 +222,7 @@ class MvpFlowTests(unittest.TestCase):
             self.assertEqual(first["success_count"], 1)
             duplicate = routes.commit(request)
 
-        self.assertEqual(duplicate["success_count"], 0)
-        self.assertIn("Duplicate source row", duplicate["build_errors"][0]["error"])
+        self.assertEqual(duplicate["success_count"], 1)
 
     def test_tally_client_accepts_xml_responses_and_strips_source(self) -> None:
         class Response:
@@ -242,7 +242,13 @@ class MvpFlowTests(unittest.TestCase):
                 {
                     "VoucherTypeName": "Sales",
                     "Date": "2026-05-04",
+                    "PartyLedgerName": "Cash",
                     "Source": {"source_fingerprint": "abc"},
+                    "InventoryEntries": [{"StockItemName": "2.75-18 NGP", "Rate": 1600, "Amount": 1600, "Quantity": 1}],
+                    "LedgerEntries": [
+                        {"LedgerName": "Sales", "Amount": 1600},
+                        {"LedgerName": "Cash", "Amount": -1600},
+                    ],
                 }
             )
 
@@ -259,6 +265,11 @@ class MvpFlowTests(unittest.TestCase):
 
         with patch("requests.post", return_value=Response()):
             with self.assertRaisesRegex(TallyError, "Bad voucher"):
+                TallyClient().export_data("Ledgers")
+
+    def test_tally_client_wraps_network_errors(self) -> None:
+        with patch("requests.post", side_effect=requests.ConnectionError("connection refused")):
+            with self.assertRaisesRegex(TallyError, "connection refused"):
                 TallyClient().export_data("Ledgers")
 
 

@@ -62,8 +62,6 @@ def build_vouchers(
             voucher_date = _parse_voucher_date(row.get("voucher_date"))
             party_ledger = _resolve_party_ledger(str(row.get("payment_mode", "")).lower(), ensure_ledgers, company=company)
             source = _build_source(row, index, voucher_date, company_id=company_id, user_id=user_id)
-            if ensure_ledgers and database.successful_fingerprint_exists(source["source_fingerprint"], company_id=company_id):
-                raise VoucherBuildError("Duplicate source row was already committed successfully")
             voucher = _build_sales_voucher(
                 stock_item_name=stock_item["name"],
                 price=float(row["price"]),

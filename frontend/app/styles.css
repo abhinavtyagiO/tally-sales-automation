@@ -10,7 +10,8 @@ body {
 }
 
 button,
-input {
+input,
+select {
   font: inherit;
 }
 
@@ -29,7 +30,14 @@ button:hover {
   background: #eef4fb;
 }
 
-input {
+button:disabled,
+input:disabled {
+  cursor: not-allowed;
+  opacity: 0.58;
+}
+
+input,
+select {
   border: 1px solid #c9d3df;
   border-radius: 6px;
   padding: 10px 12px;
@@ -48,6 +56,12 @@ input {
   place-items: center;
 }
 
+.login-panel,
+.login-form {
+  display: grid;
+  gap: 12px;
+}
+
 aside {
   background: #17202a;
   color: #ffffff;
@@ -56,6 +70,23 @@ aside {
 
 aside button {
   color: #17202a;
+}
+
+.company-list {
+  display: grid;
+  gap: 8px;
+  margin: 24px 0;
+}
+
+.company-pill {
+  justify-content: flex-start;
+  width: 100%;
+  color: #17202a;
+}
+
+.company-pill.active {
+  border-color: #7dd3fc;
+  background: #e0f2fe;
 }
 
 .workspace {
@@ -91,6 +122,27 @@ header,
   padding: 16px;
 }
 
+.status-band {
+  border-radius: 8px;
+  display: flex;
+  gap: 10px;
+  align-items: center;
+  padding: 12px 14px;
+  margin: 16px 0;
+}
+
+.status-band.connected {
+  color: #0f5132;
+  background: #d1e7dd;
+  border: 1px solid #badbcc;
+}
+
+.status-band.disconnected {
+  color: #842029;
+  background: #f8d7da;
+  border: 1px solid #f5c2c7;
+}
+
 .card {
   display: grid;
   text-align: left;
@@ -107,4 +159,105 @@ pre {
   background: #eef2f6;
   padding: 12px;
   border-radius: 6px;
+}
+
+.error {
+  color: #b42318;
+  background: #fff1f0;
+  border: 1px solid #ffccc7;
+  border-radius: 6px;
+  padding: 10px 12px;
+}
+
+.status {
+  color: #4b5563;
+}
+
+.muted {
+  color: #667085;
+  margin: 4px 0 0;
+}
+
+.file-button {
+  border: 1px solid #c9d3df;
+  background: #ffffff;
+  border-radius: 6px;
+  padding: 10px 12px;
+  display: inline-flex;
+  gap: 8px;
+  align-items: center;
+  cursor: pointer;
+}
+
+.file-button input {
+  display: none;
+}
+
+.file-button.disabled {
+  cursor: not-allowed;
+  opacity: 0.58;
+}
+
+.table-wrap {
+  overflow: auto;
+  margin-top: 16px;
+  border: 1px solid #d8e1ea;
+  border-radius: 8px;
+}
+
+table {
+  width: 100%;
+  border-collapse: collapse;
+  background: #ffffff;
+}
+
+th,
+td {
+  border-bottom: 1px solid #edf2f7;
+  padding: 10px 12px;
+  text-align: left;
+  white-space: nowrap;
+}
+
+th {
+  color: #334155;
+  background: #f8fafc;
+  font-weight: 650;
+}
+
+.summary {
+  margin-top: 16px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  align-items: center;
+  border: 1px solid #d8e1ea;
+  border-radius: 8px;
+  padding: 12px;
+  background: #f8fafc;
+}
+
+.summary ul {
+  flex-basis: 100%;
+  margin: 0;
+}
+
+@media (max-width: 760px) {
+  .shell {
+    grid-template-columns: 1fr;
+  }
+
+  header,
+  .toolbar,
+  .actions {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  input,
+  select,
+  button,
+  .file-button {
+    width: 100%;
+  }
 }

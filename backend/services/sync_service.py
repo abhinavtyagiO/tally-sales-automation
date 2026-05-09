@@ -57,7 +57,7 @@ def get_cache_snapshot() -> dict[str, Any]:
 
 def get_company_cache_snapshot(company_id: int) -> dict[str, Any]:
     company = database.get_company(company_id)
-    cache_status = get_cache_status()
+    cache_status = get_cache_status(company_id)
     return {
         "company": company["company_name"] if company else database.get_metadata("company"),
         "company_id": company_id,
@@ -74,10 +74,21 @@ def has_master_cache() -> bool:
     return bool(status["ready"] and not status["stale"])
 
 
-def get_cache_status() -> dict[str, Any]:
+def get_cache_status(company_id: int | None = None) -> dict[str, Any]:
+    return _cache_status(company_id)
+
+
+def get_company_cache_status(company_id: int) -> dict[str, Any]:
+    return _cache_status(company_id)
+
+
+def _cache_status(company_id: int | None = None) -> dict[str, Any]:
     last_sync_at = database.get_metadata("last_sync_at")
-    has_ledgers = bool(database.list_ledgers())
-    has_stock_items = bool(database.list_stock_items())
+    if company_id is not None:
+        company = database.get_company(company_id)
+        last_sync_at = company.get("last_sync_at") if company else None
+    has_ledgers = bool(database.list_ledgers(company_id))
+    has_stock_items = bool(database.list_stock_items(company_id))
     stale = True
     if last_sync_at:
         try:

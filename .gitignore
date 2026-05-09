@@ -1,4 +1,11 @@
 .venv/
+.DS_Store
+.env
+.env.*
+backend/.env
+backend/.env.*
+frontend/.env.local
+frontend/.env.*.local
 __pycache__/
 .pycache/
 *.pyc
@@ -11,3 +18,4 @@ issues-to-create.md
 mvp-brief.md
 prd-multi-company-local-agent.md
 progress.md
+tally_reference/

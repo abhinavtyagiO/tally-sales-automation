@@ -4,11 +4,11 @@ Multi-company TallyPrime sales import product with a Next.js frontend, FastAPI b
 
 ## Architecture
 
-- `frontend/`: Next.js app for login, company setup, local-agent status, sync, and import workflows.
+- `frontend/`: Next.js app for Google login, Tally connection status, company setup, Excel preview, and commit workflows.
 - `backend/`: FastAPI API, SQLite persistence, auth/session, company, import, voucher, and sync services.
 - `local_agent/`: local FastAPI service that runs on the user's Tally machine and calls the local Tally HTTP endpoint.
 
-The production model is frontend/backend plus a local agent. The backend does not directly call a user's local `localhost:9000`; it sends authorized company-scoped commands to the paired local agent.
+The production model is frontend/backend plus a local connector. The backend does not directly call a user's local `localhost:9000`; it sends authorized company-scoped commands to the trusted local connector. The connector is internal product infrastructure and should not be exposed as a normal user workflow.
 
 ## Auth And Companies
 
@@ -19,12 +19,14 @@ The production model is frontend/backend plus a local agent. The backend does no
 - Ledgers, stock items, imports, import rows, voucher logs, and duplicate checks are scoped by `company_id`.
 - Company settings include Tally URL and ledger defaults.
 
-## Local Agent
+## Tally Connection
 
-The local agent is started on the machine where TallyPrime is available.
+The local connector runs on the machine or office LAN where TallyPrime is available. User-facing UI should describe this only as the Tally connection. Normal users should not see pairing tokens, connector URLs, local ports, or manual connector setup steps.
 
 Backend endpoints:
 
+- `GET /tally/status`
+- `GET /tally/companies`
 - `POST /companies/{company_id}/agents/pairing-token`
 - `POST /agents/pair`
 - `POST /agents/heartbeat`
@@ -34,7 +36,7 @@ Agent endpoint:
 
 - `POST /tally/execute`
 
-The agent sends XML payloads to TallyPrime and returns normalized JSON responses to the backend.
+The connector sends XML payloads to TallyPrime and returns normalized JSON responses to the backend. Pairing endpoints remain backend/operations plumbing, not a normal frontend workflow.
 
 ## Supported Excel Contract
 
@@ -47,16 +49,18 @@ The MVP accepts `.xlsx` or `.xls` uploads with these required columns:
 
 Each row represents one Sales Voucher with quantity fixed at `1`.
 
-## Operator Flow
+## Product Flow
 
 1. Sign in with Google.
-2. Add a Tally company.
-3. Pair the local agent running on the Tally machine.
-4. Run company sync through `POST /companies/{company_id}/sync`.
-5. Upload Excel through `POST /companies/{company_id}/imports/upload`.
-6. Process persisted rows through `POST /companies/{company_id}/imports/{import_id}/process`.
-7. Commit valid rows through `POST /companies/{company_id}/imports/{import_id}/commit`.
-8. Review import history and row-level results.
+2. Review the simple Tally connection status.
+3. Add a Tally company from a discovered list when available, or type the company name.
+4. Backend verifies the company in Tally, saves it, selects it as active, and runs the initial ledgers/stock-items sync.
+5. Select the active company when multiple companies exist.
+6. Upload Excel through `POST /companies/{company_id}/imports/upload`.
+7. Backend runs a quick master sync, parses the Excel, validates persisted rows, and returns a preview.
+8. Review row-level ready/error results in the frontend.
+9. Commit all valid rows through `POST /companies/{company_id}/imports/{import_id}/commit`.
+10. Review success/failure summary and row-level commit errors.
 
 ## Validation Behavior
 
@@ -64,15 +68,15 @@ The backend rejects or flags rows when:
 
 - The user is unauthenticated.
 - The company is missing or owned by another user.
-- The paired local agent is offline or revoked.
+- Tally cannot be reached through the trusted connector.
 - The company master cache has not been synced.
 - The product is not an exact synced Tally Stock Item match.
 - Required company-configured ledgers are missing.
 - Price, payment mode, or voucher date is invalid.
 - The built voucher is not balanced.
-- The source row was already committed successfully for that company.
+- The active company is missing or owned by another user.
 
-During commit only, the system may create the configured UPI fallback ledger under the configured fallback group. No Stock Items or arbitrary ledgers are auto-created.
+Duplicate-looking sales rows are allowed because the same item can be sold more than once on the same day. During commit only, the system may create the configured UPI fallback ledger under the configured fallback group. No Stock Items or arbitrary ledgers are auto-created.
 
 ## Tally Transport
 

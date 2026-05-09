@@ -41,3 +41,29 @@
 - Result: 19 tests passed.
 - `cd frontend && pnpm run build`
 - Result: Next.js 16.2.4 production build passed.
+
+## Frontend MVP PRD #3 Progress
+
+- Issue #4: Implemented backend dev-auth gating through `ALLOW_DEV_AUTH`, kept real Google token verification, preserved HttpOnly session behavior, and added/updated tests for dev auth and logout session revocation.
+- Issue #5: Added backend-owned Tally connection status service and route, with simple user-facing connected/disconnected states and internal error classification.
+- Issue #6: Updated company listing/selection behavior so the backend returns active company information and persists selected company state.
+- Issue #7: Added backend Tally company discovery through the trusted connector with typed-name fallback semantics.
+- Issue #8: Updated company creation to use backend-managed Tally connectivity, verify the company, reject duplicates, select the company, and run initial master sync in the setup flow.
+
+## Frontend MVP PRD #3 Verification
+
+- `env PYTHONPYCACHEPREFIX=/Users/abhinav/Desktop/tally-sales-automation-mvp/.pycache .venv/bin/python -m unittest discover -s tests`
+- Result: 27 tests passed.
+
+- Issue #9: Implemented active-company Excel upload flow that runs backend master sync before parsing/validation and returns a row-level preview to the frontend.
+- Issue #10: Implemented explicit commit approval for valid preview rows with Tally reachability preflight and commit summary rendering.
+- Issue #11: Updated voucher building so duplicate-looking sales rows are allowed and added regression coverage for repeated same-item rows.
+- Issue #12: Normalized frontend and backend user-facing errors around auth, Tally connection, company setup, upload, and commit without exposing local-agent internals.
+- Issue #13: Replaced the prototype dashboard with focused frontend modules for login, Tally connection, company setup/selector, import preview, and commit summary.
+- Issue #14: Updated README documentation to describe the new Google login, backend-managed Tally connection, company setup, Excel preview, and commit summary flow.
+- PRD update: Added an implementation status section to `prd-frontend-mvp.md` summarizing completed work and verification.
+
+- `env PYTHONPYCACHEPREFIX=/Users/abhinav/Desktop/tally-sales-automation-mvp/.pycache .venv/bin/python -m unittest discover -s tests`
+- Result: 27 tests passed.
+- `cd frontend && pnpm run build`
+- Result: Next.js 16.2.4 production build passed.

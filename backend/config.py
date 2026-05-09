@@ -1,11 +1,28 @@
 from __future__ import annotations
 
 import os
+from pathlib import Path
+
+
+def _load_local_env() -> None:
+    for env_path in (Path(__file__).resolve().parent.parent / ".env", Path(__file__).resolve().parent / ".env"):
+        if not env_path.exists():
+            continue
+        for line in env_path.read_text().splitlines():
+            line = line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            key, value = line.split("=", 1)
+            os.environ.setdefault(key.strip(), value.strip().strip('"').strip("'"))
+
+
+_load_local_env()
 
 
 TALLY_URL = os.getenv("TALLY_URL", "http://localhost:9000")
 TALLY_TRANSPORT = os.getenv("TALLY_TRANSPORT", "xml").lower()
 GOOGLE_CLIENT_ID = os.getenv("GOOGLE_CLIENT_ID", "")
+ALLOW_DEV_AUTH = os.getenv("ALLOW_DEV_AUTH", "false").lower() == "true"
 SESSION_TTL_DAYS = int(os.getenv("SESSION_TTL_DAYS", "7"))
 COOKIE_SECURE = os.getenv("COOKIE_SECURE", "false").lower() == "true"
 SALES_LEDGER_NAME = os.getenv("SALES_LEDGER_NAME", "Sales")
