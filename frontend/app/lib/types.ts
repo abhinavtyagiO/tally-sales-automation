@@ -62,4 +62,4 @@ export type CommitSummary = {
   results: CommitResult[];
 };
 
-export type AppView = "dashboard" | "upload" | "preview" | "history";
+export type AppView = "dashboard" | "upload" | "preview" | "result" | "history";

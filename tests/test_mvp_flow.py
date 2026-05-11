@@ -284,6 +284,25 @@ class MvpFlowTests(unittest.TestCase):
             with self.assertRaisesRegex(TallyError, "Bad voucher"):
                 TallyClient().export_data("Ledgers")
 
+    def test_tally_client_prefers_short_line_error_over_full_exception_payload(self) -> None:
+        class Response:
+            text = """
+            <ENVELOPE>
+              <HEADER><STATUS>1</STATUS></HEADER>
+              <BODY><DATA><IMPORTRESULT>
+                <LINEERROR>Voucher date is missing for: 'Sales' voucher TSA-1-1. Verify the data, resolve errors (if any) and retry Split.</LINEERROR>
+                <EXCEPTIONS>1</EXCEPTIONS>
+              </IMPORTRESULT></DATA></BODY>
+            </ENVELOPE>
+            """
+
+            def raise_for_status(self):
+                return None
+
+        with patch("requests.post", return_value=Response()):
+            with self.assertRaisesRegex(TallyError, "educational mode"):
+                TallyClient().export_data("Ledgers")
+
     def test_tally_client_wraps_network_errors(self) -> None:
         with patch("requests.post", side_effect=requests.ConnectionError("connection refused")):
             with self.assertRaisesRegex(TallyError, "connection refused"):

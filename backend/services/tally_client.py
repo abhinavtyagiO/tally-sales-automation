@@ -76,14 +76,14 @@ class TallyClient:
         errors = _find_first(data, "ERRORS")
         exceptions = _find_first(data, "EXCEPTIONS")
         line_error = _find_first(data, "LINEERROR")
+        if line_error:
+            raise TallyError(_friendly_tally_line_error(str(line_error)))
         if str(status).lower() in {"0", "failed", "failure", "error"}:
             raise TallyError(f"Tally request failed: {data}")
         if errors not in (None, "", 0, "0"):
             raise TallyError(f"Tally returned errors: {data}")
         if exceptions not in (None, "", 0, "0"):
             raise TallyError(f"Tally returned exceptions: {data}")
-        if line_error:
-            raise TallyError(f"Tally line error: {line_error}")
 
     def export_data(self, report_name: str) -> dict[str, Any]:
         payload = self._envelope(
@@ -440,3 +440,9 @@ def _xml_quantity(value: Any) -> str:
     quantity = float(value)
     quantity_text = str(int(quantity)) if quantity.is_integer() else str(quantity)
     return f"{quantity_text} Nos"
+
+
+def _friendly_tally_line_error(message: str) -> str:
+    if "voucher date is missing" in message.lower():
+        return "Tally rejected the voucher date. If Tally is in educational mode, use the 1st, 2nd, or 31st of a month."
+    return message.strip()

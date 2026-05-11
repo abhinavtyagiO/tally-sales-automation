@@ -6,6 +6,7 @@ import {
   deriveImportStats,
   deriveImportStatus,
   formatUserError,
+  formatRowError,
   getUserInitials,
   getVoucherIdentifier,
   summarizePreview,
@@ -96,4 +97,13 @@ test("formatUserError keeps frontend errors plain-language", () => {
   assert.equal(formatUserError("Company not found", 404), "Company not found in Tally. Check the company name and try again.");
   assert.equal(formatUserError("connection refused", 502), "Can't connect to Tally right now. Open Tally and check the connection, then try again.");
   assert.equal(formatUserError("no session", 401), "Your session has expired. Please sign in again.");
+});
+
+test("formatRowError extracts short row-level Tally errors", () => {
+  const raw = `Local agent request failed: Tally returned exceptions: {'ENVELOPE': {'BODY': {'DATA': {'IMPORTRESULT': {'LINEERROR': "Voucher date is missing for: 'Sales' voucher TSA-19-58. Verify the data, resolve errors (if any) and retry Split."}}}}}`;
+  assert.equal(
+    formatRowError(raw),
+    "Tally rejected the voucher date. If Tally is in educational mode, use the 1st, 2nd, or 31st of a month.",
+  );
+  assert.equal(formatRowError("Product not found in synced Tally stock items"), "Product not found in synced Tally stock items.");
 });

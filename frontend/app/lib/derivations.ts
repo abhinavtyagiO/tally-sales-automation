@@ -128,6 +128,23 @@ export function formatUserError(message: string, status?: number) {
   return message || "Something went wrong. Please try again.";
 }
 
+export function formatRowError(message?: string | null) {
+  if (!message) return "";
+  const lineError = extractLineError(message);
+  const selected = lineError || message;
+  const lower = selected.toLowerCase();
+  if (lower.includes("voucher date is missing") || lower.includes("educational mode")) {
+    return "Tally rejected the voucher date. If Tally is in educational mode, use the 1st, 2nd, or 31st of a month.";
+  }
+  if (lower.includes("product not found") || lower.includes("stock item")) {
+    return "Product not found in synced Tally stock items.";
+  }
+  if (lower.includes("connect") || lower.includes("connection refused") || lower.includes("no route to host")) {
+    return "Could not connect to Tally. Check that Tally is open and reachable.";
+  }
+  return selected.split(" Verify the data")[0].split(" {'ENVELOPE'")[0].replace(/^Local agent request failed:\s*/i, "").trim();
+}
+
 function sentenceCase(value: string) {
   return value.replace(/_/g, " ").replace(/^\w/, (letter) => letter.toUpperCase());
 }
@@ -162,4 +179,11 @@ function findIdentifier(value: unknown, depth = 0): string {
     if (found) return found;
   }
   return "";
+}
+
+function extractLineError(message: string) {
+  const doubleQuoted = message.match(/LINEERROR['"]?:\s*["']([^"']+)/i);
+  if (doubleQuoted?.[1]) return doubleQuoted[1];
+  const xml = message.match(/<LINEERROR>(.*?)<\/LINEERROR>/i);
+  return xml?.[1] || "";
 }

@@ -2,7 +2,7 @@
 
 import { useEffect, useMemo, useRef, useState } from "react";
 
-import { AppShell, DashboardView, HistoryView, LoginPanel, PreviewCommitView, SetupView, UploadView } from "./components";
+import { AppShell, CommitResultView, DashboardView, HistoryView, LoginPanel, PreviewCommitView, SetupView, UploadView } from "./components";
 import { formatUserError, tallyIsConnected } from "./lib/derivations";
 import type { AppView, CommitSummary, Company, ImportPreview, ImportRecord, ImportRow, TallyCompanies, TallyStatus, User } from "./lib/types";
 
@@ -291,6 +291,7 @@ export default function Home() {
       setPreview({ import: preview.import, rows: data.rows });
       setImportDetails((current) => ({ ...current, [preview.import.id]: data.rows }));
       await loadImports(activeCompany.id);
+      setActiveView("result");
     } catch (commitError) {
       setError(commitError instanceof Error ? commitError.message : "Commit failed");
     } finally {
@@ -366,9 +367,15 @@ export default function Home() {
       )}
       {activeView === "preview" &&
         (preview ? (
-          <PreviewCommitView preview={preview} commitSummary={commitSummary} tallyStatus={tallyStatus} busy={busy} commitRows={commitRows} setActiveView={setActiveView} error={error} />
+          <PreviewCommitView preview={preview} tallyStatus={tallyStatus} busy={busy} commitRows={commitRows} setActiveView={setActiveView} error={error} />
         ) : (
           <UploadView selectedFile={selectedFile} setSelectedFile={setSelectedFile} processUpload={processUpload} tallyStatus={tallyStatus} busy={busy} error={error} />
+        ))}
+      {activeView === "result" &&
+        (preview && commitSummary ? (
+          <CommitResultView preview={preview} summary={commitSummary} setActiveView={setActiveView} />
+        ) : (
+          <HistoryView imports={imports} importDetails={importDetails} setPreviewFromImport={setPreviewFromImport} error={error} />
         ))}
       {activeView === "history" && <HistoryView imports={imports} importDetails={importDetails} setPreviewFromImport={setPreviewFromImport} error={error} />}
     </AppShell>

@@ -2,6 +2,7 @@
 
 import { ChangeEvent } from "react";
 import {
+  ArrowLeft,
   BarChart3,
   Building2,
   CheckCircle2,
@@ -21,6 +22,7 @@ import {
   formatCurrency,
   formatDateTime,
   formatNumber,
+  formatRowError,
   getUserInitials,
   getVoucherIdentifier,
   lastSyncText,
@@ -53,24 +55,24 @@ export function LoginPanel({
   return (
     <main className="login-page">
       <section className="login-panel">
-        <div className="brand-block">
-          <span className="brand-mark">
-            <Building2 size={24} />
+        <div className="login-brand">
+          <span className="login-mark">
+            <Building2 size={22} />
           </span>
-          <div>
-            <h1>AccountPilot</h1>
-            <p>Automation Pro</p>
-          </div>
-        </div>
-        <div className="login-copy">
-          <h2>Sign in to continue</h2>
-          <p>Use your Google account to manage Tally companies and Excel imports.</p>
+          <h1>AccountPilot</h1>
+          <p>Automating your financial precision with absolute clarity.</p>
         </div>
         {googleConfigured ? (
-          <div ref={googleButtonRef} />
+          <div className="google-button-wrap" ref={googleButtonRef} />
         ) : devLoginEnabled ? (
           <div className="login-form">
-            <input value={devEmail} onChange={(event) => setDevEmail(event.target.value)} placeholder="Email for local dev" type="email" />
+            <div className="login-divider">
+              <span>OR</span>
+            </div>
+            <label className="field-label" htmlFor="dev-email">
+              Email Address
+            </label>
+            <input id="dev-email" value={devEmail} onChange={(event) => setDevEmail(event.target.value)} placeholder="name@company.com" type="email" />
             <button className="primary-button" onClick={loginDev} disabled={busy || !devEmail.trim()}>
               Sign in for local dev
             </button>
@@ -383,7 +385,6 @@ export function UploadView({
 
 export function PreviewCommitView({
   preview,
-  commitSummary,
   tallyStatus,
   busy,
   commitRows,
@@ -391,15 +392,13 @@ export function PreviewCommitView({
   error,
 }: {
   preview: ImportPreview;
-  commitSummary: CommitSummary | null;
   tallyStatus: TallyStatus | null;
   busy: boolean;
   commitRows: () => void;
   setActiveView: (view: AppView) => void;
   error: string;
 }) {
-  const rows = commitSummary?.rows || preview.rows;
-  const summary = summarizePreview(rows);
+  const summary = summarizePreview(preview.rows);
   const connected = tallyIsConnected(tallyStatus);
   return (
     <div className="stack">
@@ -409,18 +408,17 @@ export function PreviewCommitView({
           <h1>Review before pushing to Tally</h1>
           <p>Valid rows can be committed now. Invalid rows will remain available for review.</p>
         </div>
-        <button className="ghost-button" onClick={() => setActiveView("upload")} disabled={busy}>
-          Upload another file
+        <button className="ghost-button back-button" onClick={() => setActiveView("upload")} disabled={busy}>
+          <ArrowLeft size={18} /> Back to Upload
         </button>
       </div>
       {error && <p className="alert error-alert">{error}</p>}
       <SummaryCards summary={summary} />
       {summary.errorRows > 0 && <p className="alert warning-alert">{summary.errorRows} invalid row{summary.errorRows === 1 ? "" : "s"} will be skipped if you commit now.</p>}
-      {commitSummary && <CommitSummaryPanel summary={commitSummary} />}
       <section className="commit-layout">
         <div className="card">
           <h3>Validation Rows</h3>
-          <RowsTable rows={rows} showCommit />
+          <RowsTable rows={preview.rows} />
         </div>
         <section className="card commit-card">
           <h3>Push to Tally</h3>
@@ -430,6 +428,48 @@ export function PreviewCommitView({
           </button>
           {!connected && <p className="muted">Open Tally and refresh the connection before committing.</p>}
         </section>
+      </section>
+    </div>
+  );
+}
+
+export function CommitResultView({
+  preview,
+  summary,
+  setActiveView,
+}: {
+  preview: ImportPreview;
+  summary: CommitSummary;
+  setActiveView: (view: AppView) => void;
+}) {
+  const resultRows = summary.rows;
+  const previewSummary = summarizePreview(resultRows);
+  return (
+    <div className="stack">
+      <div className="page-intro with-actions">
+        <div>
+          <p className="eyebrow">Commit result</p>
+          <h1>Excel commit summary</h1>
+          <p>{preview.import.filename || "Uploaded Excel"} has finished processing against Tally.</p>
+        </div>
+        <div className="result-actions">
+          <button className="ghost-button" onClick={() => setActiveView("history")}>
+            View History
+          </button>
+          <button className="primary-button" onClick={() => setActiveView("upload")}>
+            Upload Another Excel
+          </button>
+        </div>
+      </div>
+      <div className="stats-grid">
+        <MetricCard label="Rows in File" value={formatNumber(previewSummary.totalRows)} />
+        <MetricCard label="Created in Tally" value={formatNumber(summary.success_count)} tone="success" />
+        <MetricCard label="Failed During Commit" value={formatNumber(summary.failed_count)} tone={summary.failed_count ? "error" : "success"} />
+      </div>
+      <CommitSummaryPanel summary={summary} />
+      <section className="card">
+        <h3>Row Results</h3>
+        <RowsTable rows={resultRows} showCommit />
       </section>
     </div>
   );
@@ -578,7 +618,7 @@ function CommitSummaryPanel({ summary }: { summary: CommitSummary }) {
         <ul>
           {failedRows.map((row) => (
             <li key={row.id}>
-              Row {row.source_row_id}: {row.commit_error || "Commit failed"}
+              Row {row.source_row_id}: {formatRowError(row.commit_error) || "Commit failed"}
             </li>
           ))}
         </ul>
@@ -617,7 +657,7 @@ function RowsTable({ rows, showCommit = false }: { rows: ImportRow[]; showCommit
                 <td>
                   <Badge tone={commitTone}>{row.commit_status === "success" ? "Committed" : row.commit_status === "failed" ? "Failed" : row.validation_status === "valid" ? "Valid" : "Error"}</Badge>
                 </td>
-                <td>{row.validation_error || row.commit_error || ""}</td>
+                <td>{formatRowError(row.validation_error || row.commit_error)}</td>
                 {showCommit && <td>{getVoucherIdentifier(row) || "-"}</td>}
               </tr>
             );
@@ -658,6 +698,7 @@ function Badge({ children, tone }: { children: React.ReactNode; tone: "success" 
 function viewTitle(view: AppView) {
   if (view === "upload") return "Upload Page";
   if (view === "preview") return "Preview Page";
+  if (view === "result") return "Commit Result";
   if (view === "history") return "History/Logs";
   return "Dashboard";
 }

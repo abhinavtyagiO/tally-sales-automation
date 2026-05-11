@@ -71,7 +71,7 @@ def dispatch_tally_operation(agent: dict[str, Any], operation: str, payload: dic
                 response.status_code,
                 str(detail)[:500],
             )
-            raise TallyError(f"Local agent request failed: {detail}")
+            raise TallyError(_format_local_agent_error(str(detail)))
         logger.info("local_agent.dispatch.success agent_id=%s operation=%s status_code=%s", agent.get("id"), operation, response.status_code)
         return response.json()
     except requests.RequestException as exc:
@@ -112,3 +112,9 @@ def _hash_pairing_token(token: str) -> str:
     from backend.services.auth_service import hash_token
 
     return hash_token(token)
+
+
+def _format_local_agent_error(detail: str) -> str:
+    if detail.startswith("Tally rejected ") or detail.startswith("Tally "):
+        return detail
+    return f"Local agent request failed: {detail}"
