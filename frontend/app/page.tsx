@@ -1,45 +1,14 @@
 "use client";
 
-import { ChangeEvent, RefObject, useEffect, useMemo, useRef, useState } from "react";
-import { Building2, CheckCircle2, FileSpreadsheet, LogOut, RefreshCw, UploadCloud, XCircle } from "lucide-react";
+import { useEffect, useMemo, useRef, useState } from "react";
+
+import { AppShell, DashboardView, HistoryView, LoginPanel, PreviewCommitView, SetupView, UploadView } from "./components";
+import { formatUserError, tallyIsConnected } from "./lib/derivations";
+import type { AppView, CommitSummary, Company, ImportPreview, ImportRecord, ImportRow, TallyCompanies, TallyStatus, User } from "./lib/types";
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
 const GOOGLE_CLIENT_ID = process.env.NEXT_PUBLIC_GOOGLE_CLIENT_ID || "";
 const ENABLE_DEV_LOGIN = process.env.NEXT_PUBLIC_ENABLE_DEV_LOGIN === "true";
-
-type User = { email: string; name?: string };
-type Company = {
-  id: number;
-  company_name: string;
-  tally_url: string;
-  last_sync_status?: string;
-  last_sync_at?: string;
-  last_selected_at?: string;
-};
-type TallyStatus = { status: "connected" | "disconnected"; detail?: string | null; message: string };
-type TallyCompanies = { available: boolean; companies: string[]; message?: string | null };
-type ImportRecord = {
-  id: number;
-  filename?: string;
-  status: string;
-  row_count: number;
-  valid_count: number;
-  error_count: number;
-};
-type ImportRow = {
-  id: number;
-  source_row_id: string;
-  product_name: string;
-  price: number;
-  payment_mode: string;
-  voucher_date: string;
-  validation_status: "pending" | "valid" | "invalid";
-  validation_error?: string | null;
-  commit_status: "pending" | "success" | "failed";
-  commit_error?: string | null;
-};
-type ImportPreview = { import: ImportRecord; rows: ImportRow[] };
-type CommitSummary = { success_count: number; failed_count: number; rows: ImportRow[]; results: Array<{ import_row_id: number; status: string; error?: string }> };
 
 declare global {
   interface Window {
@@ -61,13 +30,16 @@ export default function Home() {
   const [activeCompanyId, setActiveCompanyId] = useState<number | null>(null);
   const [tallyStatus, setTallyStatus] = useState<TallyStatus | null>(null);
   const [tallyCompanies, setTallyCompanies] = useState<TallyCompanies>({ available: false, companies: [] });
+  const [imports, setImports] = useState<ImportRecord[]>([]);
+  const [importDetails, setImportDetails] = useState<Record<number, ImportRow[]>>({});
+  const [activeView, setActiveView] = useState<AppView>("dashboard");
   const [companyName, setCompanyName] = useState("");
+  const [selectedFile, setSelectedFile] = useState<File | null>(null);
   const [devEmail, setDevEmail] = useState("");
   const [preview, setPreview] = useState<ImportPreview | null>(null);
   const [commitSummary, setCommitSummary] = useState<CommitSummary | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
-  const [notice, setNotice] = useState("Ready");
 
   const activeCompany = useMemo(
     () => companies.find((company) => company.id === activeCompanyId) || companies[0] || null,
@@ -103,6 +75,15 @@ export default function Home() {
     document.body.appendChild(script);
   }, [user]);
 
+  useEffect(() => {
+    if (!activeCompany?.id) {
+      setImports([]);
+      setImportDetails({});
+      return;
+    }
+    void loadImports(activeCompany.id);
+  }, [activeCompany?.id]);
+
   async function api(path: string, init: RequestInit = {}) {
     const response = await fetch(`${API_URL}${path}`, {
       credentials: "include",
@@ -130,7 +111,7 @@ export default function Home() {
       } catch {
         // Keep raw response text.
       }
-      throw new Error(normalizeError(message, response.status));
+      throw new Error(formatUserError(message, response.status));
     }
     return response.json();
   }
@@ -168,15 +149,18 @@ export default function Home() {
     try {
       await api("/auth/logout", { method: "POST" });
     } catch {
-      // The local UI should still reset when the server session is already gone.
+      // Reset the local UI even if the server session has already expired.
     } finally {
       setUser(null);
       setCompanies([]);
       setActiveCompanyId(null);
+      setImports([]);
+      setImportDetails({});
       setPreview(null);
       setCommitSummary(null);
       setTallyStatus(null);
       setBusy(false);
+      setActiveView("dashboard");
     }
   }
 
@@ -184,13 +168,14 @@ export default function Home() {
     const data = await api("/companies");
     setCompanies(data.companies);
     setActiveCompanyId(data.active_company_id || data.companies[0]?.id || null);
+    if (!data.companies.length) setActiveView("dashboard");
   }
 
   async function loadTallyStatus() {
     try {
       setTallyStatus(await api("/tally/status"));
     } catch (statusError) {
-      setTallyStatus({ status: "disconnected", message: normalizeUnknown(statusError), detail: "unknown" });
+      setTallyStatus({ status: "disconnected", message: statusError instanceof Error ? statusError.message : "Can't connect to Tally right now.", detail: "unknown" });
     }
   }
 
@@ -199,6 +184,27 @@ export default function Home() {
       setTallyCompanies(await api("/tally/companies"));
     } catch {
       setTallyCompanies({ available: false, companies: [], message: "Company list is unavailable. You can type the Tally company name." });
+    }
+  }
+
+  async function loadImports(companyId: number) {
+    try {
+      const data = await api(`/companies/${companyId}/imports`);
+      const importRecords: ImportRecord[] = data.imports || [];
+      setImports(importRecords);
+      const detailEntries = await Promise.all(
+        importRecords.slice(0, 25).map(async (item) => {
+          try {
+            const detail = await api(`/companies/${companyId}/imports/${item.id}`);
+            return [item.id, detail.rows || []] as const;
+          } catch {
+            return [item.id, []] as const;
+          }
+        }),
+      );
+      setImportDetails(Object.fromEntries(detailEntries));
+    } catch (loadError) {
+      setError(loadError instanceof Error ? loadError.message : "Unable to load imports");
     }
   }
 
@@ -217,7 +223,6 @@ export default function Home() {
     if (!name || busy) return;
     setBusy(true);
     setError("");
-    setNotice("Checking Tally company...");
     try {
       const data = await api("/companies", { method: "POST", body: JSON.stringify({ company_name: name }) });
       await loadCompanies();
@@ -225,10 +230,9 @@ export default function Home() {
       setCompanyName("");
       setPreview(null);
       setCommitSummary(null);
-      setNotice("Company is ready for Excel upload");
+      setActiveView("dashboard");
     } catch (companyError) {
       setError(companyError instanceof Error ? companyError.message : "Company was not added");
-      setNotice("Company was not added");
     } finally {
       setBusy(false);
     }
@@ -242,6 +246,7 @@ export default function Home() {
       setActiveCompanyId(data.company.id);
       setPreview(null);
       setCommitSummary(null);
+      setSelectedFile(null);
       await loadCompanies();
     } catch (selectError) {
       setError(selectError instanceof Error ? selectError.message : "Unable to select company");
@@ -250,24 +255,27 @@ export default function Home() {
     }
   }
 
-  async function uploadExcel(event: ChangeEvent<HTMLInputElement>) {
-    const file = event.target.files?.[0];
-    event.target.value = "";
-    if (!file || !activeCompany || busy) return;
+  async function processUpload() {
+    if (!selectedFile || !activeCompany || busy) return;
+    if (!tallyIsConnected(tallyStatus)) {
+      setError("Open Tally and refresh the connection before processing this file.");
+      return;
+    }
     setBusy(true);
     setError("");
     setCommitSummary(null);
-    setNotice("Reading Excel and checking Tally data...");
     try {
       const formData = new FormData();
-      formData.append("file", file);
+      formData.append("file", selectedFile);
       const data = await uploadApi(`/companies/${activeCompany.id}/imports/upload`, formData);
-      setPreview({ import: data.import, rows: data.rows });
-      setNotice("Review the rows before committing to Tally");
-      await loadCompanies();
+      const nextPreview = { import: data.import, rows: data.rows };
+      setPreview(nextPreview);
+      setImportDetails((current) => ({ ...current, [data.import.id]: data.rows }));
+      setSelectedFile(null);
+      setActiveView("preview");
+      await Promise.all([loadCompanies(), loadImports(activeCompany.id)]);
     } catch (uploadError) {
       setError(uploadError instanceof Error ? uploadError.message : "Excel upload failed");
-      setNotice("Excel was not processed");
     } finally {
       setBusy(false);
     }
@@ -277,281 +285,92 @@ export default function Home() {
     if (!activeCompany || !preview || busy) return;
     setBusy(true);
     setError("");
-    setNotice("Committing valid rows to Tally...");
     try {
       const data = await api(`/companies/${activeCompany.id}/imports/${preview.import.id}/commit`, { method: "POST", body: JSON.stringify({}) });
       setCommitSummary(data);
       setPreview({ import: preview.import, rows: data.rows });
-      setNotice("Commit complete");
+      setImportDetails((current) => ({ ...current, [preview.import.id]: data.rows }));
+      await loadImports(activeCompany.id);
     } catch (commitError) {
       setError(commitError instanceof Error ? commitError.message : "Commit failed");
-      setNotice("Commit failed");
     } finally {
       setBusy(false);
     }
   }
 
+  function setPreviewFromImport(importRecord: ImportRecord) {
+    const rows = importDetails[importRecord.id] || [];
+    setPreview({ import: importRecord, rows });
+    setCommitSummary(null);
+    setActiveView("preview");
+  }
+
   if (!user) {
     return (
-      <main className="shell login">
-        <LoginPanel
-          googleButtonRef={googleButtonRef}
-          devEmail={devEmail}
-          setDevEmail={setDevEmail}
-          loginDev={loginDev}
+      <LoginPanel
+        googleButtonRef={googleButtonRef}
+        devEmail={devEmail}
+        setDevEmail={setDevEmail}
+        loginDev={loginDev}
+        busy={busy}
+        error={error}
+        googleConfigured={Boolean(GOOGLE_CLIENT_ID)}
+        devLoginEnabled={ENABLE_DEV_LOGIN}
+      />
+    );
+  }
+
+  if (!activeCompany) {
+    return (
+      <AppShell user={user} activeView="dashboard" setActiveView={setActiveView} activeCompany={null} companies={companies} busy={busy} logout={logout} refreshConnection={refreshConnection}>
+        <SetupView
+          companyName={companyName}
+          setCompanyName={setCompanyName}
+          tallyCompanies={tallyCompanies}
+          tallyStatus={tallyStatus}
+          addCompany={addCompany}
           busy={busy}
+          existingCompanies={companies}
           error={error}
         />
-      </main>
+      </AppShell>
     );
   }
 
   return (
-    <main className="shell">
-      <Sidebar user={user} companies={companies} activeCompany={activeCompany} busy={busy} logout={logout} selectCompany={selectCompany} />
-      <section className="workspace">
-        <header>
-          <div>
-            <h2>{activeCompany ? activeCompany.company_name : "Company Setup"}</h2>
-            <p className="muted">{notice}</p>
-          </div>
-          <button onClick={refreshConnection} disabled={busy} aria-label="Refresh Tally connection">
-            <RefreshCw size={16} /> Check Tally
-          </button>
-        </header>
-
-        <TallyConnection status={tallyStatus} />
-        <CompanySetup
-          companyName={companyName}
-          setCompanyName={setCompanyName}
-          tallyCompanies={tallyCompanies}
-          addCompany={addCompany}
+    <AppShell
+      user={user}
+      activeView={activeView}
+      setActiveView={setActiveView}
+      activeCompany={activeCompany}
+      companies={companies}
+      busy={busy}
+      logout={logout}
+      refreshConnection={refreshConnection}
+    >
+      {activeView === "dashboard" && (
+        <DashboardView
+          activeCompany={activeCompany}
+          companies={companies}
+          imports={imports}
+          importDetails={importDetails}
+          tallyStatus={tallyStatus}
           busy={busy}
-          existingCompanies={companies}
+          selectCompany={selectCompany}
+          setActiveView={setActiveView}
+          error={error}
         />
-        {error && <p className="error">{error}</p>}
-
-        {activeCompany && <ImportWorkflow busy={busy} preview={preview} commitSummary={commitSummary} uploadExcel={uploadExcel} commitRows={commitRows} />}
-      </section>
-    </main>
-  );
-}
-
-function LoginPanel({
-  googleButtonRef,
-  devEmail,
-  setDevEmail,
-  loginDev,
-  busy,
-  error,
-}: {
-  googleButtonRef: RefObject<HTMLDivElement | null>;
-  devEmail: string;
-  setDevEmail: (value: string) => void;
-  loginDev: () => void;
-  busy: boolean;
-  error: string;
-}) {
-  return (
-    <section className="panel login-panel">
-      <h1>Tally Sales Automation</h1>
-      {GOOGLE_CLIENT_ID ? (
-        <div ref={googleButtonRef} />
-      ) : ENABLE_DEV_LOGIN ? (
-        <div className="login-form">
-          <input value={devEmail} onChange={(event) => setDevEmail(event.target.value)} placeholder="Email for local dev" type="email" />
-          <button onClick={loginDev} disabled={busy || !devEmail.trim()}>
-            Sign in for local dev
-          </button>
-        </div>
-      ) : (
-        <p className="error">Google sign-in is not configured. Set Google client IDs before using the app.</p>
       )}
-      {error && <p className="error">{error}</p>}
-    </section>
-  );
-}
-
-function Sidebar({
-  user,
-  companies,
-  activeCompany,
-  busy,
-  logout,
-  selectCompany,
-}: {
-  user: User;
-  companies: Company[];
-  activeCompany: Company | null;
-  busy: boolean;
-  logout: () => void;
-  selectCompany: (companyId: number) => void;
-}) {
-  return (
-    <aside>
-      <h1>Tally Sales</h1>
-      <p>{user.email}</p>
-      <div className="company-list">
-        {companies.map((company) => (
-          <button key={company.id} className={company.id === activeCompany?.id ? "company-pill active" : "company-pill"} onClick={() => selectCompany(company.id)} disabled={busy}>
-            {company.company_name}
-          </button>
-        ))}
-      </div>
-      <button onClick={logout} disabled={busy}>
-        <LogOut size={16} /> Sign out
-      </button>
-    </aside>
-  );
-}
-
-function TallyConnection({ status }: { status: TallyStatus | null }) {
-  const connected = status?.status === "connected";
-  return (
-    <section className={connected ? "status-band connected" : "status-band disconnected"}>
-      {connected ? <CheckCircle2 size={18} /> : <XCircle size={18} />}
-      <span>{status?.message || "Checking Tally connection..."}</span>
-    </section>
-  );
-}
-
-function CompanySetup({
-  companyName,
-  setCompanyName,
-  tallyCompanies,
-  addCompany,
-  busy,
-  existingCompanies,
-}: {
-  companyName: string;
-  setCompanyName: (value: string) => void;
-  tallyCompanies: TallyCompanies;
-  addCompany: () => void;
-  busy: boolean;
-  existingCompanies: Company[];
-}) {
-  const duplicate = existingCompanies.some((company) => company.company_name.toLowerCase() === companyName.trim().toLowerCase());
-  return (
-    <section className="panel">
-      <h3>Add Tally Company</h3>
-      <div className="toolbar">
-        {tallyCompanies.available ? (
-          <select value={companyName} onChange={(event) => setCompanyName(event.target.value)} disabled={busy}>
-            <option value="">Select company</option>
-            {tallyCompanies.companies.map((name) => (
-              <option key={name} value={name}>
-                {name}
-              </option>
-            ))}
-          </select>
+      {activeView === "upload" && (
+        <UploadView selectedFile={selectedFile} setSelectedFile={setSelectedFile} processUpload={processUpload} tallyStatus={tallyStatus} busy={busy} error={error} />
+      )}
+      {activeView === "preview" &&
+        (preview ? (
+          <PreviewCommitView preview={preview} commitSummary={commitSummary} tallyStatus={tallyStatus} busy={busy} commitRows={commitRows} setActiveView={setActiveView} error={error} />
         ) : (
-          <input value={companyName} onChange={(event) => setCompanyName(event.target.value)} placeholder="Tally company name" disabled={busy} />
-        )}
-        <button onClick={addCompany} disabled={busy || !companyName.trim() || duplicate}>
-          <Building2 size={16} /> Add company
-        </button>
-      </div>
-      {duplicate && <p className="error">This company is already added.</p>}
-      {!tallyCompanies.available && tallyCompanies.message && <p className="muted">{tallyCompanies.message}</p>}
-    </section>
+          <UploadView selectedFile={selectedFile} setSelectedFile={setSelectedFile} processUpload={processUpload} tallyStatus={tallyStatus} busy={busy} error={error} />
+        ))}
+      {activeView === "history" && <HistoryView imports={imports} importDetails={importDetails} setPreviewFromImport={setPreviewFromImport} error={error} />}
+    </AppShell>
   );
-}
-
-function ImportWorkflow({
-  busy,
-  preview,
-  commitSummary,
-  uploadExcel,
-  commitRows,
-}: {
-  busy: boolean;
-  preview: ImportPreview | null;
-  commitSummary: CommitSummary | null;
-  uploadExcel: (event: ChangeEvent<HTMLInputElement>) => void;
-  commitRows: () => void;
-}) {
-  const validCount = preview?.rows.filter((row) => row.validation_status === "valid").length || 0;
-  return (
-    <section className="panel">
-      <h3>Excel Import</h3>
-      <div className="actions">
-        <label className={busy ? "file-button disabled" : "file-button"}>
-          <UploadCloud size={16} /> Upload Excel
-          <input type="file" accept=".xlsx,.xls" onChange={uploadExcel} disabled={busy} />
-        </label>
-        {preview && (
-          <button onClick={commitRows} disabled={busy || validCount === 0}>
-            <FileSpreadsheet size={16} /> Commit valid rows
-          </button>
-        )}
-      </div>
-      {preview && <PreviewTable preview={preview} />}
-      {commitSummary && <CommitSummaryView summary={commitSummary} />}
-    </section>
-  );
-}
-
-function PreviewTable({ preview }: { preview: ImportPreview }) {
-  return (
-    <div className="table-wrap">
-      <table>
-        <thead>
-          <tr>
-            <th>Row</th>
-            <th>Product</th>
-            <th>Price</th>
-            <th>Payment</th>
-            <th>Date</th>
-            <th>Status</th>
-            <th>Error</th>
-          </tr>
-        </thead>
-        <tbody>
-          {preview.rows.map((row) => (
-            <tr key={row.id}>
-              <td>{row.source_row_id}</td>
-              <td>{row.product_name}</td>
-              <td>{row.price}</td>
-              <td>{row.payment_mode}</td>
-              <td>{row.voucher_date}</td>
-              <td>{row.validation_status === "valid" ? "Ready" : "Error"}</td>
-              <td>{row.validation_error || row.commit_error || ""}</td>
-            </tr>
-          ))}
-        </tbody>
-      </table>
-    </div>
-  );
-}
-
-function CommitSummaryView({ summary }: { summary: CommitSummary }) {
-  const failedRows = summary.rows.filter((row) => row.commit_status === "failed");
-  return (
-    <section className="summary">
-      <strong>Commit summary</strong>
-      <span>{summary.success_count} successful</span>
-      <span>{summary.failed_count} failed</span>
-      {failedRows.length > 0 && (
-        <ul>
-          {failedRows.map((row) => (
-            <li key={row.id}>
-              Row {row.source_row_id}: {row.commit_error}
-            </li>
-          ))}
-        </ul>
-      )}
-    </section>
-  );
-}
-
-function normalizeError(message: string, status: number) {
-  if (status === 401) return "Your session has expired. Please sign in again.";
-  if (message.toLowerCase().includes("already added")) return "This company is already added.";
-  if (message.toLowerCase().includes("company not found")) return "Company not found in Tally. Check the company name and try again.";
-  if (message.toLowerCase().includes("connect to tally")) return "Can't connect to Tally right now. Please try again or contact support.";
-  return message || "Something went wrong. Please try again.";
-}
-
-function normalizeUnknown(error: unknown) {
-  return error instanceof Error ? error.message : "Can't connect to Tally right now. Please try again or contact support.";
 }

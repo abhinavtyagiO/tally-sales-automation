@@ -1,7 +1,7 @@
 import "./styles.css";
 
 export const metadata = {
-  title: "Tally Sales Automation",
+  title: "AccountPilot",
   description: "Multi-company Tally sales import workflow"
 };
 

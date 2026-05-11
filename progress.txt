@@ -67,3 +67,23 @@
 - Result: 27 tests passed.
 - `cd frontend && pnpm run build`
 - Result: Next.js 16.2.4 production build passed.
+
+## AccountPilot Frontend Redesign PRD #15 Progress
+
+- Issue #16: Implemented the AccountPilot application shell with frontend-visible AccountPilot branding, sidebar navigation, top-right user identity/sign-out, refresh control, and first-run company setup when no companies exist.
+- Issue #17: Implemented a dashboard for existing companies with Tally connection status, active company card/switcher, real vouchers-created metric from committed import rows, imports processed count, Upload Excel quick action, and recent import activity.
+- Issue #18: Implemented the Upload Excel view with a prominent file-picker component, `.xlsx`/`.xls` copy only, backend-contract guidelines, disconnected Tally processing guard, and upload through the existing company-scoped import endpoint.
+- Issue #19: Implemented the preview screen with frontend-derived total rows, valid rows, error rows, ready percentage, valid amount, date range, and a validation table containing only backend-supported row data.
+- Issue #20: Implemented commit behavior for valid rows from the preview screen, including skipped-invalid-row warning, connection/no-valid-row disabled states, compact success/failure summary, row-level commit status, and voucher identifier display when present in Tally responses.
+- Issue #21: Implemented a user-readable History/Logs screen using existing import list/detail endpoints with filename, upload/commit time, row counts, success/failure counts, status labels, and detail navigation without raw technical logs.
+- Issue #22: Extracted reusable frontend types, derivation helpers, and view components for dashboard metrics, preview summaries, import status formatting, voucher identifier extraction, and user-facing error formatting. Added focused Node tests for the derivation helpers.
+- Issue #23: Applied a desktop visual polish pass using the Stitch-inspired AccountPilot layout, navy/white styling, cards, status badges, prominent upload surface, high-density tables, and removed unsupported Sync Settings, cloud usage, drag-and-drop copy, and mapping controls.
+
+## AccountPilot Frontend Redesign PRD #15 Verification
+
+- `cd frontend && pnpm run build`
+- Result: Next.js 16.2.4 production build passed.
+- `cd frontend && pnpm run test:derivations`
+- Result: 5 derivation helper tests passed.
+- `env PYTHONPYCACHEPREFIX=/Users/abhinav/Desktop/tally-sales-automation-mvp/.pycache .venv/bin/python -m unittest discover -s tests`
+- Result: 31 tests passed.

@@ -3,7 +3,8 @@
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
-    "lint": "next lint"
+    "lint": "next lint",
+    "test:derivations": "node --test --experimental-transform-types app/lib/derivations.test.ts"
   },
   "dependencies": {
     "lucide-react": "^1.14.0",
