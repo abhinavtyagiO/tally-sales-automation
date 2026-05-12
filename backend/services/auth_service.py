@@ -87,7 +87,7 @@ def create_login_session(id_token: str, response: Response) -> dict[str, Any]:
         SESSION_COOKIE,
         token,
         httponly=True,
-        samesite="lax",
+        samesite=config.COOKIE_SAMESITE,
         secure=config.COOKIE_SECURE,
         max_age=config.SESSION_TTL_DAYS * 24 * 60 * 60,
     )
@@ -117,7 +117,7 @@ def logout(request: Request, response: Response, tally_session: Optional[str] = 
     if token:
         database.revoke_session(hash_token(token))
         logger.info("auth.logout.success")
-    response.delete_cookie(SESSION_COOKIE)
+    response.delete_cookie(SESSION_COOKIE, samesite=config.COOKIE_SAMESITE, secure=config.COOKIE_SECURE)
 
 
 def assert_same_token(left: str, right: str) -> bool:

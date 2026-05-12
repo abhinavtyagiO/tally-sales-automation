@@ -18,14 +18,24 @@ def _load_local_env() -> None:
 
 _load_local_env()
 
+APP_ENV = os.getenv("APP_ENV", "development").lower()
 
-TALLY_URL = os.getenv("TALLY_URL", "http://localhost:9000")
+TALLY_URL = os.getenv("TALLY_URL", "http://127.0.0.1:9000")
 TALLY_TRANSPORT = os.getenv("TALLY_TRANSPORT", "xml").lower()
 LOCAL_AGENT_URL = os.getenv("LOCAL_AGENT_URL", "http://localhost:9100")
+LOCAL_AGENT_BOOTSTRAP_ENABLED = os.getenv("LOCAL_AGENT_BOOTSTRAP_ENABLED", "true" if APP_ENV != "production" else "false").lower() == "true"
+LOCAL_AGENT_TOKEN = os.getenv("LOCAL_AGENT_TOKEN", "")
+LEGACY_ENDPOINTS_ENABLED = os.getenv("LEGACY_ENDPOINTS_ENABLED", "true" if APP_ENV != "production" else "false").lower() == "true"
 GOOGLE_CLIENT_ID = os.getenv("GOOGLE_CLIENT_ID", "")
 ALLOW_DEV_AUTH = os.getenv("ALLOW_DEV_AUTH", "false").lower() == "true"
 SESSION_TTL_DAYS = int(os.getenv("SESSION_TTL_DAYS", "7"))
 COOKIE_SECURE = os.getenv("COOKIE_SECURE", "false").lower() == "true"
+COOKIE_SAMESITE = os.getenv("COOKIE_SAMESITE", "lax").lower()
+CORS_ALLOWED_ORIGINS = [
+    origin.strip()
+    for origin in os.getenv("CORS_ALLOWED_ORIGINS", "http://localhost:3000,http://127.0.0.1:3000").split(",")
+    if origin.strip()
+]
 SALES_LEDGER_NAME = os.getenv("SALES_LEDGER_NAME", "Sales")
 SALES_LEDGER_GROUP = os.getenv("SALES_LEDGER_GROUP", "Sales Accounts")
 CASH_LEDGER_NAME = os.getenv("CASH_LEDGER_NAME", "Cash")

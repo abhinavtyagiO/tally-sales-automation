@@ -23,10 +23,15 @@ The production model is frontend/backend plus a local connector. The backend doe
 
 The local connector runs on the machine or office LAN where TallyPrime is available. User-facing UI should describe this only as the Tally connection. Normal users should not see pairing tokens, connector URLs, local ports, or manual connector setup steps.
 
+In local development, the backend can bootstrap a connector at `LOCAL_AGENT_URL=http://localhost:9100`. In production, disable this with `LOCAL_AGENT_BOOTSTRAP_ENABLED=false`. A cloud backend cannot reach a user's `localhost`; the connector must register a backend-reachable HTTPS `base_url`, usually through the packaged connector's tunnel/relay layer. The backend then calls that connector URL, and the connector calls Tally at its own local `TALLY_URL` such as `http://127.0.0.1:9000`.
+
+The Tally URL is stored with the company but is evaluated by the connector machine. Do not configure production backend `TALLY_URL` to a developer LAN IP such as `192.168.x.x`.
+
 Backend endpoints:
 
 - `GET /tally/status`
 - `GET /tally/companies`
+- `POST /agents/pairing-token`
 - `POST /companies/{company_id}/agents/pairing-token`
 - `POST /agents/pair`
 - `POST /agents/heartbeat`
@@ -37,6 +42,34 @@ Agent endpoint:
 - `POST /tally/execute`
 
 The connector sends XML payloads to TallyPrime and returns normalized JSON responses to the backend. Pairing endpoints remain backend/operations plumbing, not a normal frontend workflow.
+
+For a production connector tunnel, set `LOCAL_AGENT_TOKEN` on the connector to the `agent_auth_token` returned by `POST /agents/pairing-token`. The backend stores that token and sends it as `X-AccountPilot-Agent-Token` when calling `/tally/execute`.
+
+## Production Configuration
+
+Use `deployment/backend.env.example`, `deployment/frontend.env.example`, and `deployment/local-agent.env.example` as the deployment starting point.
+
+Backend production requirements:
+
+- `APP_ENV=production`
+- `GOOGLE_CLIENT_ID=<google oauth client id>`
+- `CORS_ALLOWED_ORIGINS=https://<frontend-domain>`
+- `COOKIE_SECURE=true`
+- `COOKIE_SAMESITE=none` when frontend and API are on different sites; use `lax` when they share the same site.
+- `LOCAL_AGENT_BOOTSTRAP_ENABLED=false`
+- `LEGACY_ENDPOINTS_ENABLED=false`
+
+Frontend production requirements:
+
+- `NEXT_PUBLIC_API_URL=https://<backend-domain>`
+- `NEXT_PUBLIC_GOOGLE_CLIENT_ID=<same google oauth client id>`
+- `NEXT_PUBLIC_ENABLE_DEV_LOGIN=false`
+
+Local connector production requirements:
+
+- `TALLY_URL=http://127.0.0.1:9000`, unless Tally listens elsewhere on the user's machine/LAN.
+- `LOCAL_AGENT_TOKEN=<agent_auth_token from backend pairing>`.
+- A backend-reachable HTTPS connector URL must be registered through pairing/heartbeat as `base_url`.
 
 ## Supported Excel Contract
 
