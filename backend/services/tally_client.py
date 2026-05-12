@@ -142,13 +142,13 @@ class TallyClient:
             if _text_value(_get_ci(item, "Name") or _find_first(item, "Name"))
         ]
 
-    def get_all_stock_items(self, company_name: str | None = None) -> list[str]:
+    def get_all_stock_items(self, company_name: str | None = None) -> list[dict[str, Any]]:
         data = self.export_collection("StockItem", company_name) if company_name else self.export_data("Stock Items")
         items = _extract_collection(data, "StockItem")
         return [
-            name
+            _stock_item_details(item)
             for item in items
-            if (name := _text_value(_get_ci(item, "Name") or _find_first(item, "Name")))
+            if _text_value(_get_ci(item, "Name") or _find_first(item, "Name"))
         ]
 
     def get_company_name(self) -> str | None:
@@ -243,6 +243,66 @@ def _text_value(value: Any) -> str | None:
     return str(value)
 
 
+def _stock_item_details(item: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "name": _text_value(_get_ci(item, "Name") or _find_first(item, "Name")),
+        "group_name": _text_value(_get_ci(item, "Parent") or _get_ci(item, "Group")),
+        "category": _text_value(_get_ci(item, "Category") or _get_ci(item, "StockCategory")),
+        "base_unit": _text_value(_get_ci(item, "BaseUnits") or _get_ci(item, "BaseUnit")),
+        "additional_unit": _text_value(_get_ci(item, "AdditionalUnits") or _get_ci(item, "AdditionalUnit")),
+        "opening_balance": _text_value(_get_ci(item, "OpeningBalance")),
+        "closing_balance": _text_value(_get_ci(item, "ClosingBalance")),
+        "opening_value": _text_value(_get_ci(item, "OpeningValue")),
+        "closing_value": _text_value(_get_ci(item, "ClosingValue")),
+        "opening_rate": _text_value(_get_ci(item, "OpeningRate")),
+        "closing_rate": _text_value(_get_ci(item, "ClosingRate")),
+        "gst_type": _text_value(_get_ci(item, "GSTTypeOfSupply") or _get_ci(item, "GSTOVRDNTYPEOFSUPPLY")),
+        "gst_rate": _extract_gst_rate(item),
+        "hsn_code": _text_value(_get_ci(item, "GSTHSNName") or _get_ci(item, "GSTHSNSACCode")),
+        "hsn_description": _text_value(_get_ci(item, "GSTHSNDescription")),
+        "taxability": _text_value(_get_ci(item, "GSTOVRDNTaxability")),
+        "raw": item,
+    }
+
+
+def _extract_gst_rate(item: dict[str, Any]) -> float | None:
+    rates_by_head: dict[str, float] = {}
+
+    def walk(value: Any) -> None:
+        if isinstance(value, dict):
+            duty_head = _text_value(_get_ci(value, "GSTRateDutyHead") or _get_ci(value, "DutyHead"))
+            rate = _text_value(_get_ci(value, "GSTRate") or _get_ci(value, "Rate") or _get_ci(value, "GSTRateValuationType"))
+            if duty_head and rate:
+                parsed = _parse_rate_number(rate)
+                if parsed is not None:
+                    rates_by_head[duty_head.lower()] = parsed
+            for nested in value.values():
+                walk(nested)
+        elif isinstance(value, list):
+            for nested in value:
+                walk(nested)
+
+    walk(item)
+    if rates_by_head:
+        igst = rates_by_head.get("igst")
+        if igst and igst > 0:
+            return igst
+        return sum(rate for head, rate in rates_by_head.items() if head in {"cgst", "sgst/utgst", "sgst", "utgst"})
+
+    for key in ("GSTRate", "RateOfGST", "RateOfTaxCalculation", "RateOfVAT"):
+        parsed = _parse_rate_number(_text_value(_find_first(item, key)))
+        if parsed is not None:
+            return parsed
+    return None
+
+
+def _parse_rate_number(value: str | None) -> float | None:
+    if not value:
+        return None
+    match = re.search(r"-?\d+(?:\.\d+)?", value)
+    return float(match.group(0)) if match else None
+
+
 def _parse_response(text: str) -> dict[str, Any]:
     try:
         return json.loads(text)
@@ -261,6 +321,7 @@ def _parse_response(text: str) -> dict[str, Any]:
 
 def _sanitize_xml(text: str) -> str:
     text = re.sub(r"&#(?:0*4|x0*4);", "", text, flags=re.IGNORECASE)
+    text = re.sub(r"<(/?)UDF:", r"<\1UDF_", text)
     return "".join(
         char
         for char in text

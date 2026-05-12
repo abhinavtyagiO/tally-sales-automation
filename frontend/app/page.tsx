@@ -2,9 +2,9 @@
 
 import { useEffect, useMemo, useRef, useState } from "react";
 
-import { AppShell, CommitResultView, DashboardView, HistoryView, LoginPanel, PreviewCommitView, SetupView, UploadView } from "./components";
+import { AppShell, CommitResultView, DashboardView, HistoryView, InventoryView, LoginPanel, PreviewCommitView, SetupView, UploadView } from "./components";
 import { formatUserError, tallyIsConnected } from "./lib/derivations";
-import type { AppView, CommitSummary, Company, ImportPreview, ImportRecord, ImportRow, TallyCompanies, TallyStatus, User } from "./lib/types";
+import type { AppView, CommitSummary, Company, ImportPreview, ImportRecord, ImportRow, StockItemsResponse, TallyCompanies, TallyStatus, User } from "./lib/types";
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
 const GOOGLE_CLIENT_ID = process.env.NEXT_PUBLIC_GOOGLE_CLIENT_ID || "";
@@ -32,6 +32,7 @@ export default function Home() {
   const [tallyCompanies, setTallyCompanies] = useState<TallyCompanies>({ available: false, companies: [] });
   const [imports, setImports] = useState<ImportRecord[]>([]);
   const [importDetails, setImportDetails] = useState<Record<number, ImportRow[]>>({});
+  const [stockItems, setStockItems] = useState<StockItemsResponse | null>(null);
   const [activeView, setActiveView] = useState<AppView>("dashboard");
   const [companyName, setCompanyName] = useState("");
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
@@ -79,9 +80,10 @@ export default function Home() {
     if (!activeCompany?.id) {
       setImports([]);
       setImportDetails({});
+      setStockItems(null);
       return;
     }
-    void loadImports(activeCompany.id);
+    void Promise.all([loadImports(activeCompany.id), loadStockItems(activeCompany.id)]);
   }, [activeCompany?.id]);
 
   async function api(path: string, init: RequestInit = {}) {
@@ -156,6 +158,7 @@ export default function Home() {
       setActiveCompanyId(null);
       setImports([]);
       setImportDetails({});
+      setStockItems(null);
       setPreview(null);
       setCommitSummary(null);
       setTallyStatus(null);
@@ -208,11 +211,33 @@ export default function Home() {
     }
   }
 
+  async function loadStockItems(companyId: number) {
+    try {
+      setStockItems(await api(`/companies/${companyId}/stock-items`));
+    } catch (loadError) {
+      setError(loadError instanceof Error ? loadError.message : "Unable to load inventory");
+    }
+  }
+
   async function refreshConnection() {
     setBusy(true);
     setError("");
     try {
       await Promise.all([loadTallyStatus(), loadTallyCompanies()]);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function syncInventory() {
+    if (!activeCompany || busy) return;
+    setBusy(true);
+    setError("");
+    try {
+      await api(`/companies/${activeCompany.id}/sync`, { method: "POST" });
+      await Promise.all([loadCompanies(), loadStockItems(activeCompany.id), loadTallyStatus()]);
+    } catch (syncError) {
+      setError(syncError instanceof Error ? syncError.message : "Inventory sync failed");
     } finally {
       setBusy(false);
     }
@@ -359,9 +384,11 @@ export default function Home() {
           busy={busy}
           selectCompany={selectCompany}
           setActiveView={setActiveView}
+          stockItems={stockItems}
           error={error}
         />
       )}
+      {activeView === "inventory" && <InventoryView stockItems={stockItems} busy={busy} syncInventory={syncInventory} error={error} />}
       {activeView === "upload" && (
         <UploadView selectedFile={selectedFile} setSelectedFile={setSelectedFile} processUpload={processUpload} tallyStatus={tallyStatus} busy={busy} error={error} />
       )}

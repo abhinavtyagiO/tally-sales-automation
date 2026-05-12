@@ -561,6 +561,65 @@ h3 {
   flex: 1;
 }
 
+.inventory-card {
+  padding: 0;
+  overflow: hidden;
+}
+
+.inventory-toolbar {
+  display: flex;
+  gap: 16px;
+  align-items: center;
+  padding: 20px;
+  border-bottom: 1px solid var(--border-soft);
+  flex-wrap: wrap;
+}
+
+.search-box {
+  min-width: 320px;
+  flex: 1;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 0 12px;
+  background: var(--surface);
+}
+
+.search-box input {
+  border: 0;
+  min-width: 0;
+  width: 100%;
+  padding-left: 0;
+}
+
+.search-box input:focus {
+  outline: 0;
+}
+
+.inventory-table {
+  border: 0;
+  border-radius: 0;
+}
+
+.inventory-table strong {
+  white-space: normal;
+}
+
+.warning-row {
+  background: #fffafa;
+}
+
+.table-footer {
+  display: flex;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 18px 20px;
+  background: var(--surface-muted);
+  color: var(--muted);
+}
+
 .side-stack {
   display: grid;
   gap: 24px;

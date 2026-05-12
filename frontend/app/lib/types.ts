@@ -48,6 +48,40 @@ export type ImportRow = {
 
 export type ImportPreview = { import: ImportRecord; rows: ImportRow[] };
 
+export type StockItem = {
+  id: number;
+  company_id: number;
+  name: string;
+  group_name?: string | null;
+  category?: string | null;
+  base_unit?: string | null;
+  additional_unit?: string | null;
+  opening_balance?: string | null;
+  closing_balance?: string | null;
+  opening_value?: string | null;
+  closing_value?: string | null;
+  opening_rate?: string | null;
+  closing_rate?: string | null;
+  gst_type?: string | null;
+  gst_rate?: number | null;
+  hsn_code?: string | null;
+  hsn_description?: string | null;
+  taxability?: string | null;
+  raw?: unknown;
+};
+
+export type StockItemsResponse = {
+  company_id: number;
+  company: string;
+  last_sync_at?: string | null;
+  last_sync_status?: string | null;
+  count: number;
+  groups: string[];
+  categories: string[];
+  low_stock_count: number;
+  items: StockItem[];
+};
+
 export type CommitResult = {
   import_row_id: number;
   status: string;
@@ -62,4 +96,4 @@ export type CommitSummary = {
   results: CommitResult[];
 };
 
-export type AppView = "dashboard" | "upload" | "preview" | "result" | "history";
+export type AppView = "dashboard" | "inventory" | "upload" | "preview" | "result" | "history";

@@ -1,12 +1,12 @@
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Optional
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, Header, HTTPException
 from pydantic import BaseModel
 
 from backend import config
-from backend.services.tally_client import TallyClient, TallyError
+from backend.services.tally_client import TallyClient, TallyError, _extract_collection, _stock_item_details
 
 
 app = FastAPI(title="Tally Sales Automation Local Agent", version="0.1.0")
@@ -23,7 +23,9 @@ def health() -> dict[str, str]:
 
 
 @app.post("/tally/execute")
-def execute(request: ExecuteRequest) -> dict[str, Any]:
+def execute(request: ExecuteRequest, x_accountpilot_agent_token: Optional[str] = Header(default=None)) -> dict[str, Any]:
+    if config.LOCAL_AGENT_TOKEN and x_accountpilot_agent_token != config.LOCAL_AGENT_TOKEN:
+        raise HTTPException(status_code=401, detail="Invalid local connector token")
     tally_url = request.payload.get("tally_url") or config.TALLY_URL
     company_name = request.payload.get("company_name")
     client = TallyClient(base_url=tally_url)
@@ -39,7 +41,7 @@ def execute(request: ExecuteRequest) -> dict[str, Any]:
             if collection_id.lower() == "ledger":
                 return {"ledgers": client.get_all_ledgers(company_name), "raw": data}
             if collection_id.lower() == "stockitem":
-                return {"stock_items": client.get_all_stock_items(company_name), "raw": data}
+                return {"stock_items": [_stock_item_details(item) for item in _extract_collection(data, "StockItem")], "raw": data}
             return {"raw": data}
         if request.operation == "create_sales_voucher":
             return client.create_sales_voucher(request.payload["voucher"], company_name=company_name)

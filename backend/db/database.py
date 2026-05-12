@@ -55,6 +55,7 @@ def init_db() -> None:
                 device_name TEXT NOT NULL,
                 base_url TEXT,
                 pairing_token_hash TEXT UNIQUE,
+                auth_token TEXT,
                 pairing_status TEXT NOT NULL DEFAULT 'pending',
                 last_seen_at TEXT,
                 created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -90,6 +91,22 @@ def init_db() -> None:
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 company_id INTEGER NOT NULL,
                 name TEXT NOT NULL,
+                group_name TEXT,
+                category TEXT,
+                base_unit TEXT,
+                additional_unit TEXT,
+                opening_balance TEXT,
+                closing_balance TEXT,
+                opening_value TEXT,
+                closing_value TEXT,
+                opening_rate TEXT,
+                closing_rate TEXT,
+                gst_type TEXT,
+                gst_rate REAL,
+                hsn_code TEXT,
+                hsn_description TEXT,
+                taxability TEXT,
+                raw_json TEXT,
                 FOREIGN KEY (company_id) REFERENCES companies(id) ON DELETE CASCADE
             );
 
@@ -193,6 +210,23 @@ def _migrate_existing_tables(connection: sqlite3.Connection) -> None:
         ("vouchers_log", "import_row_id", "INTEGER"),
         ("vouchers_log", "source_row_id", "TEXT"),
         ("vouchers_log", "source_fingerprint", "TEXT"),
+        ("local_agents", "auth_token", "TEXT"),
+        ("stock_items", "group_name", "TEXT"),
+        ("stock_items", "category", "TEXT"),
+        ("stock_items", "base_unit", "TEXT"),
+        ("stock_items", "additional_unit", "TEXT"),
+        ("stock_items", "opening_balance", "TEXT"),
+        ("stock_items", "closing_balance", "TEXT"),
+        ("stock_items", "opening_value", "TEXT"),
+        ("stock_items", "closing_value", "TEXT"),
+        ("stock_items", "opening_rate", "TEXT"),
+        ("stock_items", "closing_rate", "TEXT"),
+        ("stock_items", "gst_type", "TEXT"),
+        ("stock_items", "gst_rate", "REAL"),
+        ("stock_items", "hsn_code", "TEXT"),
+        ("stock_items", "hsn_description", "TEXT"),
+        ("stock_items", "taxability", "TEXT"),
+        ("stock_items", "raw_json", "TEXT"),
     ]:
         _ensure_column(connection, table, column, definition)
     connection.execute("UPDATE companies SET sales_ledger_group_name = COALESCE(sales_ledger_group_name, ?) ", (config.SALES_LEDGER_GROUP,))
@@ -224,6 +258,22 @@ def _migrate_master_table_uniqueness(connection: sqlite3.Connection) -> None:
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     company_id INTEGER NOT NULL,
                     name TEXT NOT NULL,
+                    group_name TEXT,
+                    category TEXT,
+                    base_unit TEXT,
+                    additional_unit TEXT,
+                    opening_balance TEXT,
+                    closing_balance TEXT,
+                    opening_value TEXT,
+                    closing_value TEXT,
+                    opening_rate TEXT,
+                    closing_rate TEXT,
+                    gst_type TEXT,
+                    gst_rate REAL,
+                    hsn_code TEXT,
+                    hsn_description TEXT,
+                    taxability TEXT,
+                    raw_json TEXT,
                     FOREIGN KEY (company_id) REFERENCES companies(id) ON DELETE CASCADE
                 )
                 """
@@ -481,14 +531,14 @@ def set_company_sync(company_id: int, status: str, synced_at: str | None = None)
         )
 
 
-def create_pairing_token(user_id: int, device_name: str, token_hash: str, base_url: str | None = None) -> dict[str, Any]:
+def create_pairing_token(user_id: int, device_name: str, token_hash: str, base_url: str | None = None, auth_token: str | None = None) -> dict[str, Any]:
     with get_connection() as connection:
         cursor = connection.execute(
             """
-            INSERT INTO local_agents (user_id, device_name, base_url, pairing_token_hash)
-            VALUES (?, ?, ?, ?)
+            INSERT INTO local_agents (user_id, device_name, base_url, pairing_token_hash, auth_token)
+            VALUES (?, ?, ?, ?, ?)
             """,
-            (user_id, device_name, base_url, token_hash),
+            (user_id, device_name, base_url, token_hash, auth_token),
         )
         return get_local_agent(cursor.lastrowid, user_id=user_id, connection=connection)
 
@@ -577,15 +627,94 @@ def get_active_local_agent(user_id: int) -> dict[str, Any] | None:
         return dict(row) if row else None
 
 
-def replace_stock_items(names: Iterable[str], company_id: int | None = None) -> None:
+def replace_stock_items(items: Iterable[str | dict[str, Any]], company_id: int | None = None) -> None:
     company_id = company_id or ensure_legacy_company()["id"]
-    clean_names = sorted({name.strip() for name in names if name and name.strip()})
+    stock_items = []
+    seen = set()
+    for item in items:
+        normalized = _normalize_stock_item(item)
+        name = normalized.get("name")
+        if not name or name.lower() in seen:
+            continue
+        seen.add(name.lower())
+        stock_items.append(normalized)
+    stock_items.sort(key=lambda item: item["name"].lower())
     with get_connection() as connection:
         connection.execute("DELETE FROM stock_items WHERE company_id = ?", (company_id,))
         connection.executemany(
-            "INSERT OR IGNORE INTO stock_items (company_id, name) VALUES (?, ?)",
-            [(company_id, name) for name in clean_names],
+            """
+            INSERT OR IGNORE INTO stock_items (
+                company_id, name, group_name, category, base_unit, additional_unit,
+                opening_balance, closing_balance, opening_value, closing_value,
+                opening_rate, closing_rate, gst_type, gst_rate, hsn_code,
+                hsn_description, taxability, raw_json
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            [
+                (
+                    company_id,
+                    item["name"],
+                    item.get("group_name"),
+                    item.get("category"),
+                    item.get("base_unit"),
+                    item.get("additional_unit"),
+                    item.get("opening_balance"),
+                    item.get("closing_balance"),
+                    item.get("opening_value"),
+                    item.get("closing_value"),
+                    item.get("opening_rate"),
+                    item.get("closing_rate"),
+                    item.get("gst_type"),
+                    item.get("gst_rate"),
+                    item.get("hsn_code"),
+                    item.get("hsn_description"),
+                    item.get("taxability"),
+                    json.dumps(item.get("raw")) if item.get("raw") is not None else None,
+                )
+                for item in stock_items
+            ],
         )
+
+
+def _normalize_stock_item(item: str | dict[str, Any]) -> dict[str, Any]:
+    if isinstance(item, str):
+        return {"name": item.strip()}
+    name = str(item.get("name") or item.get("Name") or "").strip()
+    return {
+        "name": name,
+        "group_name": _clean_optional(item.get("group_name") or item.get("group") or item.get("Parent")),
+        "category": _clean_optional(item.get("category") or item.get("StockCategory") or item.get("Category")),
+        "base_unit": _clean_optional(item.get("base_unit") or item.get("baseUnit") or item.get("BaseUnits")),
+        "additional_unit": _clean_optional(item.get("additional_unit") or item.get("additionalUnit") or item.get("AdditionalUnits")),
+        "opening_balance": _clean_optional(item.get("opening_balance") or item.get("openingBalance") or item.get("OpeningBalance")),
+        "closing_balance": _clean_optional(item.get("closing_balance") or item.get("closingBalance") or item.get("ClosingBalance")),
+        "opening_value": _clean_optional(item.get("opening_value") or item.get("openingValue") or item.get("OpeningValue")),
+        "closing_value": _clean_optional(item.get("closing_value") or item.get("closingValue") or item.get("ClosingValue")),
+        "opening_rate": _clean_optional(item.get("opening_rate") or item.get("openingRate") or item.get("OpeningRate")),
+        "closing_rate": _clean_optional(item.get("closing_rate") or item.get("closingRate") or item.get("ClosingRate")),
+        "gst_type": _clean_optional(item.get("gst_type") or item.get("gstType") or item.get("GSTTypeOfSupply")),
+        "gst_rate": _clean_float(item.get("gst_rate") or item.get("gstRate") or item.get("GSTRate")),
+        "hsn_code": _clean_optional(item.get("hsn_code") or item.get("hsnCode") or item.get("GSTHSNName") or item.get("GSTHSNSACCode")),
+        "hsn_description": _clean_optional(item.get("hsn_description") or item.get("hsnDescription") or item.get("GSTHSNDescription")),
+        "taxability": _clean_optional(item.get("taxability") or item.get("GSTOVRDNTaxability")),
+        "raw": item.get("raw") or item.get("Raw") or item,
+    }
+
+
+def _clean_optional(value: Any) -> str | None:
+    if value in (None, ""):
+        return None
+    return str(value).strip() or None
+
+
+def _clean_float(value: Any) -> float | None:
+    if value in (None, ""):
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
 
 
 def replace_ledgers(ledgers: Iterable[dict[str, Any]], company_id: int | None = None) -> None:
@@ -642,12 +771,22 @@ def list_stock_items(company_id: int | None = None) -> list[dict[str, Any]]:
     company_id = company_id or ensure_legacy_company()["id"]
     with get_connection() as connection:
         return [
-            dict(row)
+            _decode_stock_item(row)
             for row in connection.execute(
                 "SELECT * FROM stock_items WHERE company_id = ? ORDER BY name",
                 (company_id,),
             )
         ]
+
+
+def _decode_stock_item(row: sqlite3.Row) -> dict[str, Any]:
+    item = dict(row)
+    raw_json = item.pop("raw_json", None)
+    try:
+        item["raw"] = json.loads(raw_json) if raw_json else None
+    except json.JSONDecodeError:
+        item["raw"] = None
+    return item
 
 
 def list_ledgers(company_id: int | None = None) -> list[dict[str, Any]]:

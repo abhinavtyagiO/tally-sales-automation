@@ -1,6 +1,6 @@
 "use client";
 
-import { ChangeEvent } from "react";
+import { ChangeEvent, useMemo, useState } from "react";
 import {
   ArrowLeft,
   BarChart3,
@@ -10,7 +10,9 @@ import {
   FileSpreadsheet,
   History,
   LogOut,
+  Package,
   RefreshCw,
+  Search,
   Upload,
   XCircle,
 } from "lucide-react";
@@ -29,7 +31,7 @@ import {
   summarizePreview,
   tallyIsConnected,
 } from "./lib/derivations";
-import type { AppView, CommitSummary, Company, ImportPreview, ImportRecord, ImportRow, TallyCompanies, TallyStatus, User } from "./lib/types";
+import type { AppView, CommitSummary, Company, ImportPreview, ImportRecord, ImportRow, StockItem, StockItemsResponse, TallyCompanies, TallyStatus, User } from "./lib/types";
 
 type ImportDetails = Record<number, ImportRow[]>;
 
@@ -121,6 +123,7 @@ export function AppShell({
         </div>
         <nav className="nav-list" aria-label="Primary navigation">
           <NavButton icon={<BarChart3 size={18} />} label="Dashboard" active={activeView === "dashboard"} disabled={!companies.length} onClick={() => setActiveView("dashboard")} />
+          <NavButton icon={<Package size={18} />} label="Inventory" active={activeView === "inventory"} disabled={!companies.length} onClick={() => setActiveView("inventory")} />
           <NavButton icon={<Upload size={18} />} label="Upload" active={activeView === "upload" || activeView === "preview"} disabled={!companies.length} onClick={() => setActiveView("upload")} />
           <NavButton icon={<History size={18} />} label="History/Logs" active={activeView === "history"} disabled={!companies.length} onClick={() => setActiveView("history")} />
         </nav>
@@ -253,6 +256,7 @@ export function DashboardView({
   busy,
   selectCompany,
   setActiveView,
+  stockItems,
   error,
 }: {
   activeCompany: Company;
@@ -263,6 +267,7 @@ export function DashboardView({
   busy: boolean;
   selectCompany: (companyId: number) => void;
   setActiveView: (view: AppView) => void;
+  stockItems: StockItemsResponse | null;
   error: string;
 }) {
   const vouchersCreated = countCommittedVouchers(importDetails);
@@ -305,11 +310,96 @@ export function DashboardView({
             <strong>Upload Excel</strong>
             <span>Process sales vouchers from a spreadsheet.</span>
           </button>
+          <button className="action-card" onClick={() => setActiveView("inventory")}>
+            <Package size={22} />
+            <strong>Inventory</strong>
+            <span>{formatNumber(stockItems?.count || 0)} synced stock items.</span>
+          </button>
           <MetricCard label="Vouchers Created" value={formatNumber(vouchersCreated)} />
           <MetricCard label="Imports Processed" value={formatNumber(imports.length)} />
         </div>
       </section>
       <RecentActivity imports={recentImports} importDetails={importDetails} setActiveView={setActiveView} />
+    </div>
+  );
+}
+
+export function InventoryView({
+  stockItems,
+  busy,
+  syncInventory,
+  error,
+}: {
+  stockItems: StockItemsResponse | null;
+  busy: boolean;
+  syncInventory: () => void;
+  error: string;
+}) {
+  const [query, setQuery] = useState("");
+  const [group, setGroup] = useState("");
+  const [category, setCategory] = useState("");
+  const items = stockItems?.items || [];
+  const filteredItems = useMemo(
+    () =>
+      items.filter((item) => {
+        const searchText = `${item.name} ${item.group_name || ""} ${item.category || ""} ${item.base_unit || ""}`.toLowerCase();
+        return searchText.includes(query.trim().toLowerCase()) && (!group || item.group_name === group) && (!category || item.category === category);
+      }),
+    [items, query, group, category],
+  );
+  const inventoryValue = items.reduce((total, item) => total + (parseStockNumber(item.closing_value) || 0), 0);
+
+  return (
+    <div className="stack">
+      <div className="page-intro with-actions">
+        <div>
+          <h1>Stock Inventory</h1>
+          <p>Review the stock masters synced from your active Tally company.</p>
+        </div>
+        <button className="primary-button" onClick={syncInventory} disabled={busy}>
+          <RefreshCw size={18} /> {busy ? "Syncing..." : "Sync Inventory"}
+        </button>
+      </div>
+      {error && <p className="alert error-alert">{error}</p>}
+      <div className="stats-grid">
+        <MetricCard label="Stock Items" value={formatNumber(stockItems?.count || 0)} />
+        <MetricCard label="Low Stock Items" value={formatNumber(stockItems?.low_stock_count || 0)} tone={stockItems?.low_stock_count ? "error" : "success"} />
+        <MetricCard label="Closing Value" value={inventoryValue ? formatCurrency(inventoryValue) : "-"} />
+      </div>
+      <section className="card inventory-card">
+        <div className="inventory-toolbar">
+          <label className="search-box">
+            <Search size={18} />
+            <input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search stock" />
+          </label>
+          <select value={group} onChange={(event) => setGroup(event.target.value)}>
+            <option value="">All Groups</option>
+            {(stockItems?.groups || []).map((name) => (
+              <option key={name} value={name}>
+                {name}
+              </option>
+            ))}
+          </select>
+          <select value={category} onChange={(event) => setCategory(event.target.value)}>
+            <option value="">All Categories</option>
+            {(stockItems?.categories || []).map((name) => (
+              <option key={name} value={name}>
+                {name}
+              </option>
+            ))}
+          </select>
+          {(query || group || category) && (
+            <button className="ghost-button" onClick={() => { setQuery(""); setGroup(""); setCategory(""); }}>
+              Clear Filters
+            </button>
+          )}
+        </div>
+        <InventoryTable items={filteredItems} />
+        <div className="table-footer">
+          Showing {formatNumber(filteredItems.length)} of {formatNumber(items.length)} items
+          {stockItems?.last_sync_at && <span>Last synced: {formatDateTime(stockItems.last_sync_at)}</span>}
+        </div>
+      </section>
     </div>
   );
 }
@@ -592,6 +682,55 @@ function RecentActivity({ imports, importDetails, setActiveView }: { imports: Im
   );
 }
 
+function InventoryTable({ items }: { items: StockItem[] }) {
+  return (
+    <div className="table-wrap inventory-table">
+      <table>
+        <thead>
+          <tr>
+            <th>Item Name</th>
+            <th>Stock Group</th>
+            <th>Category</th>
+            <th>Unit</th>
+            <th>HSN</th>
+            <th>GST</th>
+            <th>Opening Bal.</th>
+            <th>Closing Bal.</th>
+            <th>Closing Value</th>
+          </tr>
+        </thead>
+        <tbody>
+          {items.map((item) => {
+            const closingQuantity = parseStockNumber(item.closing_balance);
+            return (
+              <tr key={item.id} className={closingQuantity !== null && closingQuantity <= 5 ? "warning-row" : ""}>
+                <td>
+                  <strong>{item.name}</strong>
+                </td>
+                <td>{item.group_name || "-"}</td>
+                <td>{item.category ? <Badge tone="neutral">{item.category}</Badge> : "-"}</td>
+                <td>{item.base_unit || "-"}</td>
+                <td>{item.hsn_code || "-"}</td>
+                <td>{formatGst(item)}</td>
+                <td>{item.opening_balance || "-"}</td>
+                <td>
+                  <strong className={closingQuantity !== null && closingQuantity <= 5 ? "error-text" : ""}>{item.closing_balance || "-"}</strong>
+                </td>
+                <td>{formatStockValue(item.closing_value)}</td>
+              </tr>
+            );
+          })}
+          {!items.length && (
+            <tr>
+              <td colSpan={9}>No stock items found. Sync inventory after Tally is connected.</td>
+            </tr>
+          )}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
 function SummaryCards({ summary }: { summary: ReturnType<typeof summarizePreview> }) {
   return (
     <div className="stats-grid">
@@ -697,6 +836,7 @@ function Badge({ children, tone }: { children: React.ReactNode; tone: "success" 
 
 function viewTitle(view: AppView) {
   if (view === "upload") return "Upload Page";
+  if (view === "inventory") return "Inventory Management";
   if (view === "preview") return "Preview Page";
   if (view === "result") return "Commit Result";
   if (view === "history") return "History/Logs";
@@ -706,4 +846,20 @@ function viewTitle(view: AppView) {
 function formatFileSize(size: number) {
   if (size < 1024 * 1024) return `${Math.max(1, Math.round(size / 1024))} KB`;
   return `${(size / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+function formatGst(item: StockItem) {
+  if (item.gst_rate !== null && item.gst_rate !== undefined) return `${item.gst_rate}%`;
+  return item.gst_type || "-";
+}
+
+function formatStockValue(value?: string | null) {
+  const parsed = parseStockNumber(value);
+  return parsed === null ? "-" : formatCurrency(parsed);
+}
+
+function parseStockNumber(value?: string | null) {
+  if (!value) return null;
+  const match = String(value).replace(/,/g, "").match(/-?\d+(?:\.\d+)?/);
+  return match ? Number(match[0]) : null;
 }

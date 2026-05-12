@@ -212,6 +212,14 @@ def create_agent_pairing_token(
     return result
 
 
+@router.post("/agents/pairing-token")
+def create_user_agent_pairing_token(
+    request: PairingTokenRequest,
+    user: dict[str, Any] = Depends(auth_service.get_current_user),
+) -> dict[str, Any]:
+    return local_agent_service.create_pairing_token(user["id"], request.device_name, request.base_url)
+
+
 @router.post("/agents/pair")
 def pair_agent(request: PairAgentRequest) -> dict[str, Any]:
     agent = local_agent_service.pair_agent(request.pairing_token, request.device_name, request.base_url)
@@ -251,6 +259,26 @@ def company_sync(company_id: int, user: dict[str, Any] = Depends(auth_service.ge
 def company_cache(company_id: int, user: dict[str, Any] = Depends(auth_service.get_current_user)) -> dict[str, Any]:
     require_company(user["id"], company_id)
     return get_company_cache_snapshot(company_id)
+
+
+@router.get("/companies/{company_id}/stock-items")
+def company_stock_items(company_id: int, user: dict[str, Any] = Depends(auth_service.get_current_user)) -> dict[str, Any]:
+    company = require_company(user["id"], company_id)
+    items = database.list_stock_items(company_id)
+    groups = sorted({item["group_name"] for item in items if item.get("group_name")}, key=str.lower)
+    categories = sorted({item["category"] for item in items if item.get("category")}, key=str.lower)
+    low_stock_count = sum(1 for item in items if _stock_quantity(item.get("closing_balance")) is not None and _stock_quantity(item.get("closing_balance")) <= 5)
+    return {
+        "company_id": company_id,
+        "company": company["company_name"],
+        "last_sync_at": company.get("last_sync_at"),
+        "last_sync_status": company.get("last_sync_status"),
+        "count": len(items),
+        "groups": groups,
+        "categories": categories,
+        "low_stock_count": low_stock_count,
+        "items": items,
+    }
 
 
 @router.post("/companies/{company_id}/imports/upload")
@@ -377,12 +405,14 @@ def get_company_import(company_id: int, import_id: int, user: dict[str, Any] = D
 # Legacy prototype endpoints.
 @router.post("/upload-excel")
 async def upload_excel(file: UploadFile = File(...)) -> dict[str, Any]:
+    _require_legacy_endpoint_enabled()
     rows = await _parse_upload(file)
     return {"rows": rows, "count": len(rows)}
 
 
 @router.post("/process")
 def process_rows(request: ProcessRequest) -> dict[str, Any]:
+    _require_legacy_endpoint_enabled()
     try:
         result = build_vouchers(_normalize_rows(request.rows, request.voucher_date, request.import_id), ensure_ledgers=False)
     except VoucherBuildError as exc:
@@ -397,6 +427,7 @@ def process_rows(request: ProcessRequest) -> dict[str, Any]:
 
 @router.post("/commit")
 def commit(request: CommitRequest) -> dict[str, Any]:
+    _require_legacy_endpoint_enabled()
     try:
         result = build_vouchers(_normalize_rows(request.rows, request.voucher_date, request.import_id), ensure_ledgers=True)
     except VoucherBuildError as exc:
@@ -431,6 +462,7 @@ def commit(request: CommitRequest) -> dict[str, Any]:
 
 @router.post("/sync")
 def sync() -> dict[str, Any]:
+    _require_legacy_endpoint_enabled()
     try:
         return sync_from_tally()
     except TallyError as exc:
@@ -439,6 +471,7 @@ def sync() -> dict[str, Any]:
 
 @router.get("/cache")
 def cache() -> dict[str, Any]:
+    _require_legacy_endpoint_enabled()
     return get_cache_snapshot()
 
 
@@ -548,6 +581,15 @@ def _friendly_tally_exception(exc: TallyError) -> HTTPException:
     return HTTPException(status_code=502, detail="Tally action failed. Please try again or contact support.")
 
 
+def _stock_quantity(value: Any) -> float | None:
+    if value in (None, ""):
+        return None
+    try:
+        return float(str(value).split()[0].replace(",", ""))
+    except (TypeError, ValueError, IndexError):
+        return None
+
+
 def _ensure_local_agent(user_id: int, base_url: str) -> dict[str, Any]:
     try:
         pairing = local_agent_service.create_pairing_token(user_id, "Local Tally machine", base_url)
@@ -585,3 +627,8 @@ def _model_to_dict(model: BaseModel) -> dict[str, Any]:
     if hasattr(model, "model_dump"):
         return model.model_dump(exclude_unset=True)
     return model.dict(exclude_unset=True)
+
+
+def _require_legacy_endpoint_enabled() -> None:
+    if not config.LEGACY_ENDPOINTS_ENABLED:
+        raise HTTPException(status_code=404, detail="Not found")

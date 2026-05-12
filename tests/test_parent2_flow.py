@@ -119,6 +119,39 @@ class Parent2FlowTests(unittest.TestCase):
 
         self.assertIsNone(database.get_session_by_hash(auth_service.hash_token(cookie)))
 
+    def test_user_scoped_agent_pairing_token_returns_one_time_connector_secret(self) -> None:
+        pairing = routes.create_user_agent_pairing_token(
+            routes.PairingTokenRequest(device_name="Office Connector", base_url="https://connector.example.test"),
+            user=self.user,
+        )
+
+        self.assertIn("pairing_token", pairing)
+        self.assertIn("agent_auth_token", pairing)
+        self.assertNotIn("auth_token", pairing["agent"])
+
+        paired = routes.pair_agent(
+            routes.PairAgentRequest(
+                pairing_token=pairing["pairing_token"],
+                device_name="Office Connector",
+                base_url="https://connector.example.test",
+            )
+        )
+        self.assertEqual(paired["agent"]["pairing_status"], "paired")
+        self.assertNotIn("auth_token", paired["agent"])
+
+        stored = database.get_local_agent(pairing["agent"]["id"], user_id=self.user["id"])
+        self.assertEqual(stored["auth_token"], pairing["agent_auth_token"])
+
+    def test_legacy_prototype_endpoints_can_be_disabled_for_production(self) -> None:
+        original = config.LEGACY_ENDPOINTS_ENABLED
+        config.LEGACY_ENDPOINTS_ENABLED = False
+        self.addCleanup(lambda: setattr(config, "LEGACY_ENDPOINTS_ENABLED", original))
+
+        with self.assertRaises(HTTPException) as raised:
+            routes.sync()
+
+        self.assertEqual(raised.exception.status_code, 404)
+
     def test_company_scoped_masters_allow_same_names(self) -> None:
         first = self.make_company(company_name="Company A")
         second = self.make_company(company_name="Company B")
@@ -273,6 +306,43 @@ class Parent2FlowTests(unittest.TestCase):
         self.assertEqual(result["last_sync_status"], "success")
         self.assertEqual(len(database.list_ledgers(company["id"])), 2)
         self.assertEqual(len(database.list_stock_items(company["id"])), 1)
+
+    def test_company_sync_persists_detailed_stock_items_for_inventory_screen(self) -> None:
+        company = self.make_company()
+        agent = self.make_agent()
+        database.update_company(company["id"], self.user["id"], {"local_agent_id": agent["id"]})
+
+        def fake_dispatch(agent_arg, operation, payload):
+            if payload["collection_id"] == "Ledger":
+                return {"ledgers": [{"name": "Sales", "group": "Sales Accounts"}]}
+            return {
+                "stock_items": [
+                    {
+                        "name": "Apple MacBook Pro Laptop",
+                        "group_name": "Laptops",
+                        "category": "Finished Goods",
+                        "base_unit": "Nos",
+                        "opening_balance": "10 Nos",
+                        "closing_balance": "4 Nos",
+                        "closing_value": "400000.00",
+                        "gst_type": "Goods",
+                        "gst_rate": 18,
+                        "raw": {"NAME": "Apple MacBook Pro Laptop"},
+                    }
+                ]
+            }
+
+        with patch("backend.services.local_agent_service.dispatch_tally_operation", side_effect=fake_dispatch):
+            routes.company_sync(company["id"], user=self.user)
+
+        response = routes.company_stock_items(company["id"], user=self.user)
+        item = response["items"][0]
+        self.assertEqual(response["count"], 1)
+        self.assertEqual(response["low_stock_count"], 1)
+        self.assertEqual(response["groups"], ["Laptops"])
+        self.assertEqual(item["base_unit"], "Nos")
+        self.assertEqual(item["gst_rate"], 18)
+        self.assertEqual(item["raw"], {"NAME": "Apple MacBook Pro Laptop"})
 
     def test_import_rows_persist_and_process_validates_company_masters(self) -> None:
         company = self.make_company()
