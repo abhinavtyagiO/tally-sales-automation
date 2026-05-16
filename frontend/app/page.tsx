@@ -2,9 +2,9 @@
 
 import { useEffect, useMemo, useRef, useState } from "react";
 
-import { AppShell, CommitResultView, DashboardView, HistoryView, InventoryView, LoginPanel, PreviewCommitView, SetupView, UploadView } from "./components";
+import { AppShell, CommitResultView, DashboardView, HistoryDetailView, HistoryView, InventoryView, LoginPanel, PreviewCommitView, SetupView, UploadView } from "./components";
 import { formatUserError, tallyIsConnected } from "./lib/derivations";
-import type { AppView, CommitSummary, Company, ImportPreview, ImportRecord, ImportRow, StockItemsResponse, TallyCompanies, TallyStatus, User } from "./lib/types";
+import type { AppView, CommitSummary, Company, ImportPreview, ImportRecord, ImportRow, ImportType, StockItemsResponse, TallyCompanies, TallyStatus, User } from "./lib/types";
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
 const GOOGLE_CLIENT_ID = process.env.NEXT_PUBLIC_GOOGLE_CLIENT_ID || "";
@@ -35,10 +35,14 @@ export default function Home() {
   const [stockItems, setStockItems] = useState<StockItemsResponse | null>(null);
   const [activeView, setActiveView] = useState<AppView>("dashboard");
   const [companyName, setCompanyName] = useState("");
+  const [supplierGstin, setSupplierGstin] = useState("");
+  const [supplierState, setSupplierState] = useState("");
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
+  const [importType, setImportType] = useState<ImportType>("retail_sales");
   const [devEmail, setDevEmail] = useState("");
   const [preview, setPreview] = useState<ImportPreview | null>(null);
   const [commitSummary, setCommitSummary] = useState<CommitSummary | null>(null);
+  const [historyDetail, setHistoryDetail] = useState<ImportPreview | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
 
@@ -161,6 +165,7 @@ export default function Home() {
       setStockItems(null);
       setPreview(null);
       setCommitSummary(null);
+      setHistoryDetail(null);
       setTallyStatus(null);
       setBusy(false);
       setActiveView("dashboard");
@@ -245,14 +250,25 @@ export default function Home() {
 
   async function addCompany() {
     const name = companyName.trim();
-    if (!name || busy) return;
+    const gstin = supplierGstin.trim().toUpperCase();
+    const state = supplierState.trim();
+    if (!name || !gstin || !state || busy) return;
     setBusy(true);
     setError("");
     try {
-      const data = await api("/companies", { method: "POST", body: JSON.stringify({ company_name: name }) });
+      const data = await api("/companies", {
+        method: "POST",
+        body: JSON.stringify({
+          company_name: name,
+          supplier_gstin: gstin,
+          supplier_state: state,
+        }),
+      });
       await loadCompanies();
       setActiveCompanyId(data.company.id);
       setCompanyName("");
+      setSupplierGstin("");
+      setSupplierState("");
       setPreview(null);
       setCommitSummary(null);
       setActiveView("dashboard");
@@ -271,6 +287,7 @@ export default function Home() {
       setActiveCompanyId(data.company.id);
       setPreview(null);
       setCommitSummary(null);
+      setHistoryDetail(null);
       setSelectedFile(null);
       await loadCompanies();
     } catch (selectError) {
@@ -292,6 +309,7 @@ export default function Home() {
     try {
       const formData = new FormData();
       formData.append("file", selectedFile);
+      formData.append("import_type", importType);
       const data = await uploadApi(`/companies/${activeCompany.id}/imports/upload`, formData);
       const nextPreview = { import: data.import, rows: data.rows };
       setPreview(nextPreview);
@@ -324,11 +342,24 @@ export default function Home() {
     }
   }
 
-  function setPreviewFromImport(importRecord: ImportRecord) {
-    const rows = importDetails[importRecord.id] || [];
-    setPreview({ import: importRecord, rows });
-    setCommitSummary(null);
-    setActiveView("preview");
+  async function openImportLog(importRecord: ImportRecord) {
+    if (!activeCompany) return;
+    setBusy(true);
+    setError("");
+    try {
+      let rows = importDetails[importRecord.id] || [];
+      if (!rows.length) {
+        const detail = await api(`/companies/${activeCompany.id}/imports/${importRecord.id}`);
+        rows = detail.rows || [];
+        setImportDetails((current) => ({ ...current, [importRecord.id]: rows }));
+      }
+      setHistoryDetail({ import: importRecord, rows });
+      setActiveView("historyDetail");
+    } catch (detailError) {
+      setError(detailError instanceof Error ? detailError.message : "Unable to load upload log");
+    } finally {
+      setBusy(false);
+    }
   }
 
   if (!user) {
@@ -352,6 +383,10 @@ export default function Home() {
         <SetupView
           companyName={companyName}
           setCompanyName={setCompanyName}
+          supplierGstin={supplierGstin}
+          setSupplierGstin={setSupplierGstin}
+          supplierState={supplierState}
+          setSupplierState={setSupplierState}
           tallyCompanies={tallyCompanies}
           tallyStatus={tallyStatus}
           addCompany={addCompany}
@@ -390,21 +425,45 @@ export default function Home() {
       )}
       {activeView === "inventory" && <InventoryView stockItems={stockItems} busy={busy} syncInventory={syncInventory} error={error} />}
       {activeView === "upload" && (
-        <UploadView selectedFile={selectedFile} setSelectedFile={setSelectedFile} processUpload={processUpload} tallyStatus={tallyStatus} busy={busy} error={error} />
+        <UploadView
+          selectedFile={selectedFile}
+          setSelectedFile={setSelectedFile}
+          importType={importType}
+          setImportType={setImportType}
+          processUpload={processUpload}
+          tallyStatus={tallyStatus}
+          busy={busy}
+          error={error}
+        />
       )}
       {activeView === "preview" &&
         (preview ? (
           <PreviewCommitView preview={preview} tallyStatus={tallyStatus} busy={busy} commitRows={commitRows} setActiveView={setActiveView} error={error} />
         ) : (
-          <UploadView selectedFile={selectedFile} setSelectedFile={setSelectedFile} processUpload={processUpload} tallyStatus={tallyStatus} busy={busy} error={error} />
+          <UploadView
+            selectedFile={selectedFile}
+            setSelectedFile={setSelectedFile}
+            importType={importType}
+            setImportType={setImportType}
+            processUpload={processUpload}
+            tallyStatus={tallyStatus}
+            busy={busy}
+            error={error}
+          />
         ))}
       {activeView === "result" &&
         (preview && commitSummary ? (
           <CommitResultView preview={preview} summary={commitSummary} setActiveView={setActiveView} />
         ) : (
-          <HistoryView imports={imports} importDetails={importDetails} setPreviewFromImport={setPreviewFromImport} error={error} />
+          <HistoryView imports={imports} importDetails={importDetails} openImportLog={openImportLog} error={error} />
         ))}
-      {activeView === "history" && <HistoryView imports={imports} importDetails={importDetails} setPreviewFromImport={setPreviewFromImport} error={error} />}
+      {activeView === "history" && <HistoryView imports={imports} importDetails={importDetails} openImportLog={openImportLog} error={error} />}
+      {activeView === "historyDetail" &&
+        (historyDetail ? (
+          <HistoryDetailView detail={historyDetail} setActiveView={setActiveView} error={error} />
+        ) : (
+          <HistoryView imports={imports} importDetails={importDetails} openImportLog={openImportLog} error={error} />
+        ))}
     </AppShell>
   );
 }

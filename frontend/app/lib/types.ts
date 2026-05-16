@@ -1,9 +1,20 @@
 export type User = { email: string; name?: string };
 
+export type ImportType = "retail_sales" | "gst_tax_invoice";
+
 export type Company = {
   id: number;
   company_name: string;
   tally_url: string;
+  supplier_gstin?: string | null;
+  supplier_state?: string | null;
+  gst_registration_name?: string | null;
+  gst_registration_type?: string | null;
+  gst_sales_ledger_name?: string | null;
+  cgst_ledger_name?: string | null;
+  sgst_ledger_name?: string | null;
+  igst_ledger_name?: string | null;
+  gst_buyer_ledger_group?: string | null;
   last_sync_status?: string | null;
   last_sync_at?: string | null;
   last_selected_at?: string | null;
@@ -24,6 +35,7 @@ export type TallyCompanies = {
 export type ImportRecord = {
   id: number;
   filename?: string | null;
+  import_type?: ImportType | string | null;
   status: string;
   row_count: number;
   valid_count: number;
@@ -37,8 +49,21 @@ export type ImportRow = {
   source_row_id: string;
   product_name: string;
   price: number;
+  quantity?: number | null;
+  rate?: number | null;
   payment_mode: string;
   voucher_date: string;
+  buyer_name?: string | null;
+  buyer_gstin?: string | null;
+  buyer_state?: string | null;
+  buyer_address?: string | null;
+  place_of_supply?: string | null;
+  taxable_amount?: number | null;
+  gst_rate?: number | null;
+  cgst_amount?: number | null;
+  sgst_amount?: number | null;
+  igst_amount?: number | null;
+  total_amount?: number | null;
   validation_status: "pending" | "valid" | "invalid";
   validation_error?: string | null;
   commit_status: "pending" | "success" | "failed";
@@ -96,4 +121,4 @@ export type CommitSummary = {
   results: CommitResult[];
 };
 
-export type AppView = "dashboard" | "inventory" | "upload" | "preview" | "result" | "history";
+export type AppView = "dashboard" | "inventory" | "upload" | "preview" | "result" | "history" | "historyDetail";

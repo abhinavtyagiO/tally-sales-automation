@@ -16,9 +16,10 @@ logger = logging.getLogger(__name__)
 
 def create_pairing_token(user_id: int, device_name: str, base_url: Optional[str] = None) -> dict[str, Any]:
     token = database.random_token()
-    agent = database.create_pairing_token(user_id, device_name, _hash_pairing_token(token), base_url=base_url)
+    agent_auth_token = database.random_token()
+    agent = database.create_pairing_token(user_id, device_name, _hash_pairing_token(token), base_url=base_url, auth_token=agent_auth_token)
     logger.info("local_agent.pairing_token.created user_id=%s agent_id=%s base_url=%s", user_id, agent["id"], base_url)
-    return {"pairing_token": token, "agent": agent}
+    return {"pairing_token": token, "agent_auth_token": agent_auth_token, "agent": _public_agent(agent)}
 
 
 def pair_agent(pairing_token: str, device_name: Optional[str] = None, base_url: Optional[str] = None) -> dict[str, Any]:
@@ -27,7 +28,7 @@ def pair_agent(pairing_token: str, device_name: Optional[str] = None, base_url: 
         logger.warning("local_agent.pair.failed reason=invalid_pairing_token device_name=%s base_url=%s", device_name, base_url)
         raise HTTPException(status_code=404, detail="Invalid pairing token")
     logger.info("local_agent.pair.success user_id=%s agent_id=%s base_url=%s", agent["user_id"], agent["id"], agent.get("base_url"))
-    return agent
+    return _public_agent(agent)
 
 
 def heartbeat(agent_id: int, user_id: Optional[int] = None, base_url: Optional[str] = None) -> dict[str, Any]:
@@ -36,7 +37,7 @@ def heartbeat(agent_id: int, user_id: Optional[int] = None, base_url: Optional[s
         logger.warning("local_agent.heartbeat.failed agent_id=%s user_id=%s reason=not_found", agent_id, user_id)
         raise HTTPException(status_code=404, detail="Local agent not found")
     logger.info("local_agent.heartbeat.success agent_id=%s user_id=%s base_url=%s", agent_id, agent.get("user_id"), agent.get("base_url"))
-    return agent
+    return _public_agent(agent)
 
 
 def dispatch_tally_operation(agent: dict[str, Any], operation: str, payload: dict[str, Any]) -> dict[str, Any]:
@@ -56,6 +57,7 @@ def dispatch_tally_operation(agent: dict[str, Any], operation: str, payload: dic
         response = requests.post(
             f"{base_url}/tally/execute",
             json={"operation": operation, "payload": payload},
+            headers={"X-AccountPilot-Agent-Token": agent["auth_token"]} if agent.get("auth_token") else None,
             timeout=30,
         )
         if response.status_code >= 400:
@@ -112,6 +114,12 @@ def _hash_pairing_token(token: str) -> str:
     from backend.services.auth_service import hash_token
 
     return hash_token(token)
+
+
+def _public_agent(agent: dict[str, Any]) -> dict[str, Any]:
+    public = dict(agent)
+    public.pop("auth_token", None)
+    return public
 
 
 def _format_local_agent_error(detail: str) -> str:

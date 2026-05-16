@@ -27,11 +27,12 @@ import {
   formatRowError,
   getUserInitials,
   getVoucherIdentifier,
+  importTypeLabel,
   lastSyncText,
   summarizePreview,
   tallyIsConnected,
 } from "./lib/derivations";
-import type { AppView, CommitSummary, Company, ImportPreview, ImportRecord, ImportRow, StockItem, StockItemsResponse, TallyCompanies, TallyStatus, User } from "./lib/types";
+import type { AppView, CommitSummary, Company, ImportPreview, ImportRecord, ImportRow, ImportType, StockItem, StockItemsResponse, TallyCompanies, TallyStatus, User } from "./lib/types";
 
 type ImportDetails = Record<number, ImportRow[]>;
 
@@ -125,7 +126,7 @@ export function AppShell({
           <NavButton icon={<BarChart3 size={18} />} label="Dashboard" active={activeView === "dashboard"} disabled={!companies.length} onClick={() => setActiveView("dashboard")} />
           <NavButton icon={<Package size={18} />} label="Inventory" active={activeView === "inventory"} disabled={!companies.length} onClick={() => setActiveView("inventory")} />
           <NavButton icon={<Upload size={18} />} label="Upload" active={activeView === "upload" || activeView === "preview"} disabled={!companies.length} onClick={() => setActiveView("upload")} />
-          <NavButton icon={<History size={18} />} label="History/Logs" active={activeView === "history"} disabled={!companies.length} onClick={() => setActiveView("history")} />
+          <NavButton icon={<History size={18} />} label="History/Logs" active={activeView === "history" || activeView === "historyDetail"} disabled={!companies.length} onClick={() => setActiveView("history")} />
         </nav>
         <button className="primary-button sidebar-action" onClick={() => setActiveView("upload")} disabled={!companies.length}>
           <Upload size={18} /> Upload Excel
@@ -190,6 +191,10 @@ function NavButton({ icon, label, active, disabled, onClick }: { icon: React.Rea
 export function SetupView({
   companyName,
   setCompanyName,
+  supplierGstin,
+  setSupplierGstin,
+  supplierState,
+  setSupplierState,
   tallyCompanies,
   tallyStatus,
   addCompany,
@@ -199,6 +204,10 @@ export function SetupView({
 }: {
   companyName: string;
   setCompanyName: (value: string) => void;
+  supplierGstin: string;
+  setSupplierGstin: (value: string) => void;
+  supplierState: string;
+  setSupplierState: (value: string) => void;
   tallyCompanies: TallyCompanies;
   tallyStatus: TallyStatus | null;
   addCompany: () => void;
@@ -207,6 +216,9 @@ export function SetupView({
   error: string;
 }) {
   const duplicate = existingCompanies.some((company) => company.company_name.toLowerCase() === companyName.trim().toLowerCase());
+  const gstinValue = supplierGstin.trim().toUpperCase();
+  const gstinLooksValid = !gstinValue || /^\d{2}[A-Z]{5}\d{4}[A-Z][1-9A-Z]Z[0-9A-Z]$/.test(gstinValue);
+  const canAddCompany = Boolean(companyName.trim() && gstinValue && supplierState.trim() && gstinLooksValid && !duplicate && !busy);
   return (
     <div className="setup-layout">
       <section className="hero-panel">
@@ -214,7 +226,7 @@ export function SetupView({
         <div>
           <p className="eyebrow">First-run setup</p>
           <h1>Connect your Tally company</h1>
-          <p className="lead">Add the company name exactly as it appears in Tally. AccountPilot will verify it before saving.</p>
+          <p className="lead">Add the company name and GST details exactly as they apply to your Tally company. AccountPilot will verify the company before saving.</p>
         </div>
       </section>
       <section className="card form-card">
@@ -235,11 +247,27 @@ export function SetupView({
           ) : (
             <input id="company-name" value={companyName} onChange={(event) => setCompanyName(event.target.value)} placeholder="Bhrama Enterprises" disabled={busy} />
           )}
-          <button className="primary-button" onClick={addCompany} disabled={busy || !companyName.trim() || duplicate}>
+          <button className="primary-button" onClick={addCompany} disabled={!canAddCompany}>
             Add Company
           </button>
         </div>
+        <div className="setup-gst-grid">
+          <div>
+            <label className="field-label" htmlFor="supplier-gstin">
+              Company GSTIN
+            </label>
+            <input id="supplier-gstin" value={supplierGstin} onChange={(event) => setSupplierGstin(event.target.value.toUpperCase())} placeholder="29AAECP4424C1ZN" disabled={busy} required />
+          </div>
+          <div>
+            <label className="field-label" htmlFor="supplier-state">
+              Company GST state
+            </label>
+            <input id="supplier-state" value={supplierState} onChange={(event) => setSupplierState(event.target.value)} placeholder="Karnataka" disabled={busy} required />
+          </div>
+        </div>
+        <p className="muted">GST details are required during setup so GST tax invoices can be created without extra configuration later.</p>
         {duplicate && <p className="alert error-alert">This company is already added.</p>}
+        {gstinValue && !gstinLooksValid && <p className="alert error-alert">Enter a valid 15-character GSTIN.</p>}
         {!tallyCompanies.available && tallyCompanies.message && <p className="muted">{tallyCompanies.message}</p>}
         {error && <p className="alert error-alert">{error}</p>}
       </section>
@@ -407,6 +435,8 @@ export function InventoryView({
 export function UploadView({
   selectedFile,
   setSelectedFile,
+  importType,
+  setImportType,
   processUpload,
   tallyStatus,
   busy,
@@ -414,12 +444,28 @@ export function UploadView({
 }: {
   selectedFile: File | null;
   setSelectedFile: (file: File | null) => void;
+  importType: ImportType;
+  setImportType: (value: ImportType) => void;
   processUpload: () => void;
   tallyStatus: TallyStatus | null;
   busy: boolean;
   error: string;
 }) {
   const connected = tallyIsConnected(tallyStatus);
+  const isGst = importType === "gst_tax_invoice";
+  const guidelines = isGst
+    ? [
+        "Use columns `voucher_date`, `buyer_name`, `buyer_gstin`, `buyer_state`, `product_name`, `quantity`, `rate`, and `payment_mode`.",
+        "Buyer GSTIN must be valid and buyer state must match the place of supply.",
+        "Product names must exactly match Tally stock items with GST rate configured.",
+        "Valid rows become GST sales invoices with CGST/SGST or IGST calculated automatically.",
+      ]
+    : [
+        "Use columns `product_name`, `price`, `payment_mode`, and `voucher_date`.",
+        "Product names must exactly match stock items in Tally.",
+        "Each valid row becomes one sales voucher.",
+        "Voucher dates must be valid.",
+      ];
   return (
     <div className="upload-layout">
       <section>
@@ -427,9 +473,21 @@ export function UploadView({
           <h1>Import Financial Records</h1>
           <p>Select an Excel file to validate sales rows against your active Tally company.</p>
         </div>
+        <div className="upload-type-grid">
+          <button className={importType === "retail_sales" ? "upload-type-card active" : "upload-type-card"} onClick={() => setImportType("retail_sales")} disabled={busy}>
+            <FileSpreadsheet size={22} />
+            <strong>Retail Sales</strong>
+            <span>Standard sales voucher rows</span>
+          </button>
+          <button className={isGst ? "upload-type-card active" : "upload-type-card"} onClick={() => setImportType("gst_tax_invoice")} disabled={busy}>
+            <FileSpreadsheet size={22} />
+            <strong>GST Tax Invoices</strong>
+            <span>Buyer GSTIN, state, tax and invoice rows</span>
+          </button>
+        </div>
         <label className="upload-picker">
           <Upload size={48} />
-          <strong>{selectedFile ? selectedFile.name : "Choose your Excel file"}</strong>
+          <strong>{selectedFile ? selectedFile.name : `Choose your ${importTypeLabel(importType)} Excel`}</strong>
           <span>Supports .xlsx and .xls files</span>
           <input type="file" accept=".xlsx,.xls" onChange={(event: ChangeEvent<HTMLInputElement>) => setSelectedFile(event.target.files?.[0] || null)} disabled={busy} />
         </label>
@@ -450,11 +508,17 @@ export function UploadView({
         <section className="card">
           <h3>Upload Guidelines</h3>
           <ol className="guideline-list">
-            <li>Use columns `product_name`, `price`, `payment_mode`, and `voucher_date`.</li>
-            <li>Product names must exactly match stock items in Tally.</li>
-            <li>Each row becomes one sales voucher.</li>
-            <li>Voucher dates must be valid.</li>
+            {guidelines.map((item) => (
+              <li key={item}>{item}</li>
+            ))}
           </ol>
+        </section>
+        <section className="card">
+          <h3>Template</h3>
+          <p className="muted">Download a starter sheet with the required headers for {importTypeLabel(importType).toLowerCase()}.</p>
+          <button className="ghost-button wide-button" onClick={() => downloadTemplate(importType)} disabled={busy}>
+            Download Template
+          </button>
         </section>
         <section className="card">
           <h3>Tally Status</h3>
@@ -568,12 +632,12 @@ export function CommitResultView({
 export function HistoryView({
   imports,
   importDetails,
-  setPreviewFromImport,
+  openImportLog,
   error,
 }: {
   imports: ImportRecord[];
   importDetails: ImportDetails;
-  setPreviewFromImport: (importRecord: ImportRecord) => void;
+  openImportLog: (importRecord: ImportRecord) => void;
   error: string;
 }) {
   return (
@@ -594,6 +658,7 @@ export function HistoryView({
               <tr>
                 <th>Date/Time</th>
                 <th>File Name</th>
+                <th>Type</th>
                 <th>Rows</th>
                 <th>Success</th>
                 <th>Failed</th>
@@ -610,6 +675,7 @@ export function HistoryView({
                   <tr key={item.id}>
                     <td>{formatDateTime(item.completed_at || item.created_at)}</td>
                     <td>{item.filename || "Uploaded Excel"}</td>
+                    <td>{importTypeLabel(item.import_type)}</td>
                     <td>{item.row_count}</td>
                     <td>{stats.successCount}</td>
                     <td>{stats.failedCount}</td>
@@ -617,7 +683,7 @@ export function HistoryView({
                       <Badge tone={status.tone}>{status.label}</Badge>
                     </td>
                     <td>
-                      <button className="link-button" onClick={() => setPreviewFromImport(item)}>
+                      <button className="link-button" onClick={() => openImportLog(item)}>
                         View Details
                       </button>
                     </td>
@@ -626,12 +692,80 @@ export function HistoryView({
               })}
               {!imports.length && (
                 <tr>
-                  <td colSpan={7}>No imports yet.</td>
+                  <td colSpan={8}>No imports yet.</td>
                 </tr>
               )}
             </tbody>
           </table>
         </div>
+      </section>
+    </div>
+  );
+}
+
+export function HistoryDetailView({
+  detail,
+  setActiveView,
+  error,
+}: {
+  detail: ImportPreview;
+  setActiveView: (view: AppView) => void;
+  error: string;
+}) {
+  const rows = detail.rows;
+  const previewSummary = summarizePreview(rows);
+  const stats = deriveImportStats(rows);
+  const status = deriveImportStatus(detail.import, rows);
+  return (
+    <div className="stack">
+      <div className="page-intro with-actions">
+        <div>
+          <p className="eyebrow">Upload log</p>
+          <h1>{detail.import.filename || "Uploaded Excel"}</h1>
+          <p>
+            {importTypeLabel(detail.import.import_type)} uploaded on {formatDateTime(detail.import.created_at)}.
+          </p>
+        </div>
+        <button className="ghost-button back-button" onClick={() => setActiveView("history")}>
+          <ArrowLeft size={18} /> Back to History
+        </button>
+      </div>
+      {error && <p className="alert error-alert">{error}</p>}
+      <div className="stats-grid">
+        <MetricCard label="Rows in File" value={formatNumber(detail.import.row_count)} />
+        <MetricCard label="Valid Rows" value={formatNumber(previewSummary.validRows)} tone="success" />
+        <MetricCard label="Invalid Rows" value={formatNumber(previewSummary.errorRows)} tone={previewSummary.errorRows ? "error" : "success"} />
+        <MetricCard label="Committed" value={formatNumber(stats.successCount)} tone={stats.successCount ? "success" : undefined} />
+        <MetricCard label="Failed" value={formatNumber(stats.failedCount)} tone={stats.failedCount ? "error" : undefined} />
+        <MetricCard label="Pending" value={formatNumber(stats.pendingCount)} />
+      </div>
+      <section className="card">
+        <div className="card-heading">
+          <h3>Upload Event</h3>
+          <Badge tone={status.tone}>{status.label}</Badge>
+        </div>
+        <div className="detail-grid">
+          <p>
+            <span>Created</span>
+            <strong>{formatDateTime(detail.import.created_at)}</strong>
+          </p>
+          <p>
+            <span>Completed</span>
+            <strong>{formatDateTime(detail.import.completed_at)}</strong>
+          </p>
+          <p>
+            <span>Upload Type</span>
+            <strong>{importTypeLabel(detail.import.import_type)}</strong>
+          </p>
+          <p>
+            <span>Total Value</span>
+            <strong>{formatCurrency(previewSummary.totalValidAmount)}</strong>
+          </p>
+        </div>
+      </section>
+      <section className="card">
+        <h3>Rows</h3>
+        <RowsTable rows={rows} showCommit />
       </section>
     </div>
   );
@@ -651,6 +785,7 @@ function RecentActivity({ imports, importDetails, setActiveView }: { imports: Im
           <thead>
             <tr>
               <th>File</th>
+              <th>Type</th>
               <th>Timestamp</th>
               <th>Rows</th>
               <th>Status</th>
@@ -662,6 +797,7 @@ function RecentActivity({ imports, importDetails, setActiveView }: { imports: Im
               return (
                 <tr key={item.id}>
                   <td>{item.filename || "Uploaded Excel"}</td>
+                  <td>{importTypeLabel(item.import_type)}</td>
                   <td>{formatDateTime(item.created_at)}</td>
                   <td>{item.row_count}</td>
                   <td>
@@ -672,7 +808,7 @@ function RecentActivity({ imports, importDetails, setActiveView }: { imports: Im
             })}
             {!imports.length && (
               <tr>
-                <td colSpan={4}>No recent imports yet.</td>
+                <td colSpan={5}>No recent imports yet.</td>
               </tr>
             )}
           </tbody>
@@ -692,7 +828,6 @@ function InventoryTable({ items }: { items: StockItem[] }) {
             <th>Stock Group</th>
             <th>Category</th>
             <th>Unit</th>
-            <th>HSN</th>
             <th>GST</th>
             <th>Opening Bal.</th>
             <th>Closing Bal.</th>
@@ -710,7 +845,6 @@ function InventoryTable({ items }: { items: StockItem[] }) {
                 <td>{item.group_name || "-"}</td>
                 <td>{item.category ? <Badge tone="neutral">{item.category}</Badge> : "-"}</td>
                 <td>{item.base_unit || "-"}</td>
-                <td>{item.hsn_code || "-"}</td>
                 <td>{formatGst(item)}</td>
                 <td>{item.opening_balance || "-"}</td>
                 <td>
@@ -722,7 +856,7 @@ function InventoryTable({ items }: { items: StockItem[] }) {
           })}
           {!items.length && (
             <tr>
-              <td colSpan={9}>No stock items found. Sync inventory after Tally is connected.</td>
+              <td colSpan={8}>No stock items found. Sync inventory after Tally is connected.</td>
             </tr>
           )}
         </tbody>
@@ -767,6 +901,7 @@ function CommitSummaryPanel({ summary }: { summary: CommitSummary }) {
 }
 
 function RowsTable({ rows, showCommit = false }: { rows: ImportRow[]; showCommit?: boolean }) {
+  const isGst = rows.some((row) => row.buyer_gstin || row.total_amount || row.gst_rate);
   return (
     <div className="table-wrap">
       <table>
@@ -774,7 +909,11 @@ function RowsTable({ rows, showCommit = false }: { rows: ImportRow[]; showCommit
           <tr>
             <th>Row</th>
             <th>Product Name</th>
-            <th>Price</th>
+            {isGst && <th>Buyer</th>}
+            {isGst && <th>GSTIN</th>}
+            <th>{isGst ? "Taxable" : "Price"}</th>
+            {isGst && <th>GST</th>}
+            {isGst && <th>Total</th>}
             <th>Payment Mode</th>
             <th>Voucher Date</th>
             <th>Status</th>
@@ -783,14 +922,18 @@ function RowsTable({ rows, showCommit = false }: { rows: ImportRow[]; showCommit
           </tr>
         </thead>
         <tbody>
-          {rows.map((row) => {
+          {rows.map((row, index) => {
             const validationTone = row.validation_status === "valid" ? "success" : "error";
             const commitTone = row.commit_status === "success" ? "success" : row.commit_status === "failed" ? "error" : validationTone;
             return (
               <tr key={row.id} className={row.validation_status === "invalid" || row.commit_status === "failed" ? "error-row" : ""}>
-                <td>{row.source_row_id}</td>
+                <td title={`Excel row ${row.source_row_id}`}>{index + 1}</td>
                 <td>{row.product_name}</td>
-                <td>{formatCurrency(Number(row.price))}</td>
+                {isGst && <td>{row.buyer_name || "-"}</td>}
+                {isGst && <td>{row.buyer_gstin || "-"}</td>}
+                <td>{formatCurrency(Number(row.taxable_amount || row.price))}</td>
+                {isGst && <td>{row.gst_rate ? `${row.gst_rate}%` : "-"}</td>}
+                {isGst && <td>{formatCurrency(Number(row.total_amount || row.price))}</td>}
                 <td>{row.payment_mode}</td>
                 <td>{row.voucher_date}</td>
                 <td>
@@ -805,6 +948,40 @@ function RowsTable({ rows, showCommit = false }: { rows: ImportRow[]; showCommit
       </table>
     </div>
   );
+}
+
+function downloadTemplate(importType: ImportType) {
+  const rows =
+    importType === "gst_tax_invoice"
+      ? [
+          ["voucher_date", "buyer_name", "buyer_gstin", "buyer_state", "buyer_address", "place_of_supply", "product_name", "quantity", "rate", "payment_mode"],
+          ["2026-03-01", "Chanda Enterprises", "29AAACH1004N1ZQ", "Karnataka", "Bengaluru", "Karnataka", "GST Coffee", "20", "75", "Bank Transfer"],
+        ]
+      : [
+          ["product_name", "price", "payment_mode", "voucher_date"],
+          ["Coffee Powder", "450", "Cash", "2026-03-01"],
+        ];
+  const sheetRows = rows
+    .map((row) => `<Row>${row.map((cell) => `<Cell><Data ss:Type="String">${escapeXml(cell)}</Data></Cell>`).join("")}</Row>`)
+    .join("");
+  const workbook = `<?xml version="1.0"?>
+<?mso-application progid="Excel.Sheet"?>
+<Workbook xmlns="urn:schemas-microsoft-com:office:spreadsheet"
+  xmlns:o="urn:schemas-microsoft-com:office:office"
+  xmlns:x="urn:schemas-microsoft-com:office:excel"
+  xmlns:ss="urn:schemas-microsoft-com:office:spreadsheet">
+  <Worksheet ss:Name="Template"><Table>${sheetRows}</Table></Worksheet>
+</Workbook>`;
+  const blob = new Blob([workbook], { type: "application/vnd.ms-excel" });
+  const link = document.createElement("a");
+  link.href = URL.createObjectURL(blob);
+  link.download = importType === "gst_tax_invoice" ? "gst-tax-invoice-template.xls" : "retail-sales-template.xls";
+  link.click();
+  URL.revokeObjectURL(link.href);
+}
+
+function escapeXml(value: string) {
+  return value.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
 }
 
 function TallyConnection({ status }: { status: TallyStatus | null }) {
@@ -839,7 +1016,7 @@ function viewTitle(view: AppView) {
   if (view === "inventory") return "Inventory Management";
   if (view === "preview") return "Preview Page";
   if (view === "result") return "Commit Result";
-  if (view === "history") return "History/Logs";
+  if (view === "history" || view === "historyDetail") return "History/Logs";
   return "Dashboard";
 }
 

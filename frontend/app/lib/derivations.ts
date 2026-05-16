@@ -1,4 +1,4 @@
-import type { Company, ImportRecord, ImportRow, TallyStatus, User } from "./types";
+import type { Company, ImportRecord, ImportRow, ImportType, TallyStatus, User } from "./types";
 
 export type PreviewSummary = {
   totalRows: number;
@@ -34,7 +34,7 @@ export function summarizePreview(rows: ImportRow[]): PreviewSummary {
     validRows: validRows.length,
     errorRows: rows.filter((row) => row.validation_status === "invalid").length,
     readyPercentage: rows.length ? Math.round((validRows.length / rows.length) * 1000) / 10 : 0,
-    totalValidAmount: validRows.reduce((total, row) => total + Number(row.price || 0), 0),
+    totalValidAmount: validRows.reduce((total, row) => total + Number(row.total_amount || row.price || 0), 0),
     dateRangeText: formatDateRange(dates[0], dates[dates.length - 1]),
   };
 }
@@ -65,6 +65,10 @@ export function countCommittedVouchers(detailRowsByImportId: Record<number, Impo
 
 export function formatCurrency(value: number) {
   return INR_FORMATTER.format(value || 0);
+}
+
+export function importTypeLabel(importType?: ImportType | string | null) {
+  return importType === "gst_tax_invoice" ? "GST Tax Invoice" : "Retail Sales";
 }
 
 export function formatNumber(value: number) {

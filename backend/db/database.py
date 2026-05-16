@@ -68,6 +68,15 @@ def init_db() -> None:
                 user_id INTEGER NOT NULL,
                 company_name TEXT NOT NULL,
                 tally_url TEXT NOT NULL,
+                supplier_gstin TEXT,
+                supplier_state TEXT,
+                gst_registration_name TEXT,
+                gst_registration_type TEXT,
+                gst_sales_ledger_name TEXT,
+                cgst_ledger_name TEXT,
+                sgst_ledger_name TEXT,
+                igst_ledger_name TEXT,
+                gst_buyer_ledger_group TEXT,
                 sales_ledger_name TEXT NOT NULL,
                 sales_ledger_group_name TEXT NOT NULL DEFAULT 'Sales Accounts',
                 cash_ledger_name TEXT NOT NULL,
@@ -123,6 +132,7 @@ def init_db() -> None:
                 user_id INTEGER NOT NULL,
                 company_id INTEGER NOT NULL,
                 filename TEXT,
+                import_type TEXT NOT NULL DEFAULT 'retail_sales',
                 status TEXT NOT NULL,
                 row_count INTEGER NOT NULL DEFAULT 0,
                 valid_count INTEGER NOT NULL DEFAULT 0,
@@ -140,8 +150,21 @@ def init_db() -> None:
                 source_row_id TEXT NOT NULL,
                 product_name TEXT NOT NULL,
                 price REAL NOT NULL,
+                quantity REAL,
+                rate REAL,
                 payment_mode TEXT NOT NULL,
                 voucher_date TEXT NOT NULL,
+                buyer_name TEXT,
+                buyer_gstin TEXT,
+                buyer_state TEXT,
+                buyer_address TEXT,
+                place_of_supply TEXT,
+                taxable_amount REAL,
+                gst_rate REAL,
+                cgst_amount REAL,
+                sgst_amount REAL,
+                igst_amount REAL,
+                total_amount REAL,
                 validation_status TEXT NOT NULL DEFAULT 'pending',
                 validation_error TEXT,
                 voucher_preview TEXT,
@@ -201,6 +224,15 @@ def _migrate_existing_tables(connection: sqlite3.Connection) -> None:
         ("stock_items", "company_id", "INTEGER"),
         ("ledgers", "company_id", "INTEGER"),
         ("companies", "sales_ledger_group_name", "TEXT"),
+        ("companies", "supplier_gstin", "TEXT"),
+        ("companies", "supplier_state", "TEXT"),
+        ("companies", "gst_registration_name", "TEXT"),
+        ("companies", "gst_registration_type", "TEXT"),
+        ("companies", "gst_sales_ledger_name", "TEXT"),
+        ("companies", "cgst_ledger_name", "TEXT"),
+        ("companies", "sgst_ledger_name", "TEXT"),
+        ("companies", "igst_ledger_name", "TEXT"),
+        ("companies", "gst_buyer_ledger_group", "TEXT"),
         ("companies", "cash_ledger_group_name", "TEXT"),
         ("companies", "payment_default_group_name", "TEXT"),
         ("companies", "payment_ledger_mappings", "TEXT"),
@@ -227,11 +259,32 @@ def _migrate_existing_tables(connection: sqlite3.Connection) -> None:
         ("stock_items", "hsn_description", "TEXT"),
         ("stock_items", "taxability", "TEXT"),
         ("stock_items", "raw_json", "TEXT"),
+        ("imports", "import_type", "TEXT NOT NULL DEFAULT 'retail_sales'"),
+        ("import_rows", "quantity", "REAL"),
+        ("import_rows", "rate", "REAL"),
+        ("import_rows", "buyer_name", "TEXT"),
+        ("import_rows", "buyer_gstin", "TEXT"),
+        ("import_rows", "buyer_state", "TEXT"),
+        ("import_rows", "buyer_address", "TEXT"),
+        ("import_rows", "place_of_supply", "TEXT"),
+        ("import_rows", "taxable_amount", "REAL"),
+        ("import_rows", "gst_rate", "REAL"),
+        ("import_rows", "cgst_amount", "REAL"),
+        ("import_rows", "sgst_amount", "REAL"),
+        ("import_rows", "igst_amount", "REAL"),
+        ("import_rows", "total_amount", "REAL"),
     ]:
         _ensure_column(connection, table, column, definition)
     connection.execute("UPDATE companies SET sales_ledger_group_name = COALESCE(sales_ledger_group_name, ?) ", (config.SALES_LEDGER_GROUP,))
     connection.execute("UPDATE companies SET cash_ledger_group_name = COALESCE(cash_ledger_group_name, ?) ", (config.CASH_LEDGER_GROUP,))
     connection.execute("UPDATE companies SET payment_default_group_name = COALESCE(payment_default_group_name, ?) ", (config.DEFAULT_PAYMENT_LEDGER_GROUP,))
+    connection.execute("UPDATE companies SET gst_registration_name = COALESCE(gst_registration_name, ?) ", (config.GST_REGISTRATION_NAME,))
+    connection.execute("UPDATE companies SET gst_registration_type = COALESCE(gst_registration_type, ?) ", (config.GST_REGISTRATION_TYPE,))
+    connection.execute("UPDATE companies SET gst_sales_ledger_name = COALESCE(gst_sales_ledger_name, ?) ", (config.GST_SALES_LEDGER_NAME,))
+    connection.execute("UPDATE companies SET cgst_ledger_name = COALESCE(cgst_ledger_name, ?) ", (config.CGST_LEDGER_NAME,))
+    connection.execute("UPDATE companies SET sgst_ledger_name = COALESCE(sgst_ledger_name, ?) ", (config.SGST_LEDGER_NAME,))
+    connection.execute("UPDATE companies SET igst_ledger_name = COALESCE(igst_ledger_name, ?) ", (config.IGST_LEDGER_NAME,))
+    connection.execute("UPDATE companies SET gst_buyer_ledger_group = COALESCE(gst_buyer_ledger_group, ?) ", (config.GST_BUYER_LEDGER_GROUP,))
 
 
 def _ensure_column(connection: sqlite3.Connection, table: str, column: str, definition: str) -> None:
@@ -397,17 +450,29 @@ def create_company(user_id: int, data: dict[str, Any]) -> dict[str, Any]:
         cursor = connection.execute(
             """
             INSERT INTO companies (
-                user_id, company_name, tally_url, sales_ledger_name, sales_ledger_group_name,
+                user_id, company_name, tally_url, supplier_gstin, supplier_state,
+                gst_registration_name, gst_registration_type, gst_sales_ledger_name,
+                cgst_ledger_name, sgst_ledger_name, igst_ledger_name, gst_buyer_ledger_group,
+                sales_ledger_name, sales_ledger_group_name,
                 cash_ledger_name, cash_ledger_group_name, upi_fallback_ledger_name,
                 upi_fallback_group_name, payment_default_group_name, payment_ledger_mappings,
                 setup_completed_at, local_agent_id, updated_at
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 user_id,
                 data["company_name"],
                 data.get("tally_url", config.TALLY_URL),
+                data.get("supplier_gstin"),
+                data.get("supplier_state"),
+                data.get("gst_registration_name", config.GST_REGISTRATION_NAME),
+                data.get("gst_registration_type", config.GST_REGISTRATION_TYPE),
+                data.get("gst_sales_ledger_name", config.GST_SALES_LEDGER_NAME),
+                data.get("cgst_ledger_name", config.CGST_LEDGER_NAME),
+                data.get("sgst_ledger_name", config.SGST_LEDGER_NAME),
+                data.get("igst_ledger_name", config.IGST_LEDGER_NAME),
+                data.get("gst_buyer_ledger_group", config.GST_BUYER_LEDGER_GROUP),
                 data.get("sales_ledger_name", config.SALES_LEDGER_NAME),
                 data.get("sales_ledger_group_name", config.SALES_LEDGER_GROUP),
                 data.get("cash_ledger_name", config.CASH_LEDGER_NAME),
@@ -472,6 +537,15 @@ def update_company(company_id: int, user_id: int, data: dict[str, Any]) -> dict[
     allowed = {
         "company_name",
         "tally_url",
+        "supplier_gstin",
+        "supplier_state",
+        "gst_registration_name",
+        "gst_registration_type",
+        "gst_sales_ledger_name",
+        "cgst_ledger_name",
+        "sgst_ledger_name",
+        "igst_ledger_name",
+        "gst_buyer_ledger_group",
         "sales_ledger_name",
         "sales_ledger_group_name",
         "cash_ledger_name",
@@ -695,9 +769,9 @@ def _normalize_stock_item(item: str | dict[str, Any]) -> dict[str, Any]:
         "closing_rate": _clean_optional(item.get("closing_rate") or item.get("closingRate") or item.get("ClosingRate")),
         "gst_type": _clean_optional(item.get("gst_type") or item.get("gstType") or item.get("GSTTypeOfSupply")),
         "gst_rate": _clean_float(item.get("gst_rate") or item.get("gstRate") or item.get("GSTRate")),
-        "hsn_code": _clean_optional(item.get("hsn_code") or item.get("hsnCode") or item.get("GSTHSNName") or item.get("GSTHSNSACCode")),
+        "hsn_code": _clean_optional(item.get("hsn_code") or item.get("hsnCode") or item.get("GSTHSNName") or item.get("GSTHSNSACCode") or item.get("HSNCode")),
         "hsn_description": _clean_optional(item.get("hsn_description") or item.get("hsnDescription") or item.get("GSTHSNDescription")),
-        "taxability": _clean_optional(item.get("taxability") or item.get("GSTOVRDNTaxability")),
+        "taxability": _clean_optional(item.get("taxability") or item.get("GSTOVRDNTaxability") or item.get("Taxability")),
         "raw": item.get("raw") or item.get("Raw") or item,
     }
 
@@ -801,23 +875,25 @@ def list_ledgers(company_id: int | None = None) -> list[dict[str, Any]]:
         ]
 
 
-def create_import(user_id: int, company_id: int, filename: str | None, rows: list[dict[str, Any]]) -> dict[str, Any]:
+def create_import(user_id: int, company_id: int, filename: str | None, rows: list[dict[str, Any]], import_type: str = "retail_sales") -> dict[str, Any]:
     with get_connection() as connection:
         cursor = connection.execute(
             """
-            INSERT INTO imports (user_id, company_id, filename, status, row_count)
-            VALUES (?, ?, ?, 'uploaded', ?)
+            INSERT INTO imports (user_id, company_id, filename, import_type, status, row_count)
+            VALUES (?, ?, ?, ?, 'uploaded', ?)
             """,
-            (user_id, company_id, filename, len(rows)),
+            (user_id, company_id, filename, import_type, len(rows)),
         )
         import_id = cursor.lastrowid
         connection.executemany(
             """
             INSERT INTO import_rows (
                 import_id, company_id, source_row_id, product_name, price,
-                payment_mode, voucher_date
+                quantity, rate, payment_mode, voucher_date, buyer_name, buyer_gstin,
+                buyer_state, buyer_address, place_of_supply, taxable_amount, gst_rate,
+                cgst_amount, sgst_amount, igst_amount, total_amount
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             [
                 (
@@ -825,14 +901,33 @@ def create_import(user_id: int, company_id: int, filename: str | None, rows: lis
                     company_id,
                     str(row.get("source_row_id") or index + 1),
                     row["product_name"],
-                    float(row["price"]),
+                    float(row.get("price") or row.get("rate") or 0),
+                    _optional_float(row.get("quantity")),
+                    _optional_float(row.get("rate")),
                     row["payment_mode"],
                     row["voucher_date"],
+                    row.get("buyer_name"),
+                    row.get("buyer_gstin"),
+                    row.get("buyer_state"),
+                    row.get("buyer_address"),
+                    row.get("place_of_supply"),
+                    _optional_float(row.get("taxable_amount")),
+                    _optional_float(row.get("gst_rate")),
+                    _optional_float(row.get("cgst_amount")),
+                    _optional_float(row.get("sgst_amount")),
+                    _optional_float(row.get("igst_amount")),
+                    _optional_float(row.get("total_amount")),
                 )
                 for index, row in enumerate(rows)
             ],
         )
         return get_import(import_id, user_id=user_id, company_id=company_id, connection=connection)
+
+
+def _optional_float(value: Any) -> float | None:
+    if value in (None, ""):
+        return None
+    return float(value)
 
 
 def get_import(import_id: int, user_id: int, company_id: int, connection: sqlite3.Connection | None = None) -> dict[str, Any] | None:
@@ -880,6 +975,30 @@ def update_import_row_validation(import_row_id: int, status: str, error: str | N
             WHERE id = ?
             """,
             (status, error, json.dumps(voucher_preview) if voucher_preview else None, import_row_id),
+        )
+
+
+def update_import_row_gst_totals(import_row_id: int, voucher_preview: dict[str, Any] | None) -> None:
+    if not voucher_preview:
+        return
+    tax = voucher_preview.get("TaxSplit") or {}
+    with get_connection() as connection:
+        connection.execute(
+            """
+            UPDATE import_rows
+            SET taxable_amount = ?, gst_rate = ?, cgst_amount = ?, sgst_amount = ?,
+                igst_amount = ?, total_amount = ?
+            WHERE id = ?
+            """,
+            (
+                tax.get("taxable_amount") or voucher_preview.get("TaxableAmount"),
+                tax.get("gst_rate"),
+                tax.get("cgst_amount"),
+                tax.get("sgst_amount"),
+                tax.get("igst_amount"),
+                tax.get("invoice_total") or voucher_preview.get("InvoiceTotal"),
+                import_row_id,
+            ),
         )
 
 

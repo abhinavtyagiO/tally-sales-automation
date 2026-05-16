@@ -13,6 +13,7 @@ from backend import config
 from backend.api import routes
 from backend.db import database
 from backend.services import auth_service, local_agent_service
+from backend.services.gst_invoice import IMPORT_TYPE_GST
 from backend.services.sync_service import sync_from_tally
 from backend.services.tally_client import TallyError
 
@@ -45,6 +46,13 @@ class Parent2FlowTests(unittest.TestCase):
     def make_agent(self) -> dict:
         database.create_pairing_token(self.user["id"], "Office PC", "hash", base_url="http://localhost:9100")
         return database.pair_local_agent("hash", base_url="http://localhost:9100")
+
+    def company_request(self, company_name: str = "Bhrama Enterprises") -> routes.CompanyRequest:
+        return routes.CompanyRequest(
+            company_name=company_name,
+            supplier_gstin="29AAECP4424C1ZN",
+            supplier_state="Karnataka",
+        )
 
     def fake_master_dispatch(self, agent_arg, operation, payload):
         if operation == "health_check":
@@ -223,7 +231,7 @@ class Parent2FlowTests(unittest.TestCase):
             side_effect=self.fake_master_dispatch,
         ) as dispatch:
             created = routes.create_company(
-                routes.CompanyRequest(company_name="Bhrama Enterprises"),
+                self.company_request(),
                 user=self.user,
             )
 
@@ -234,8 +242,34 @@ class Parent2FlowTests(unittest.TestCase):
         self.assertTrue(any(call.args[2].get("company_name") == "Bhrama Enterprises" for call in dispatch.call_args_list if call.args[1] == "export_collection"))
 
         with self.assertRaises(HTTPException) as raised:
-            routes.create_company(routes.CompanyRequest(company_name="bhrama enterprises"), user=self.user)
+            routes.create_company(self.company_request("bhrama enterprises"), user=self.user)
         self.assertEqual(raised.exception.status_code, 409)
+
+    def test_create_company_requires_company_gst_details(self) -> None:
+        with self.assertRaises(HTTPException) as missing_gstin:
+            routes.create_company(
+                routes.CompanyRequest(company_name="Bhrama Enterprises", supplier_state="Karnataka"),
+                user=self.user,
+            )
+        self.assertEqual(missing_gstin.exception.status_code, 400)
+        self.assertEqual(missing_gstin.exception.detail, "Company GSTIN is required")
+
+        with self.assertRaises(HTTPException) as invalid_gstin:
+            routes.create_company(
+                routes.CompanyRequest(company_name="Bhrama Enterprises", supplier_gstin="invalid", supplier_state="Karnataka"),
+                user=self.user,
+            )
+        self.assertEqual(invalid_gstin.exception.status_code, 400)
+        self.assertEqual(invalid_gstin.exception.detail, "Company GSTIN must be a valid GSTIN")
+
+        with self.assertRaises(HTTPException) as missing_state:
+            routes.create_company(
+                routes.CompanyRequest(company_name="Bhrama Enterprises", supplier_gstin="29AAECP4424C1ZN"),
+                user=self.user,
+            )
+        self.assertEqual(missing_state.exception.status_code, 400)
+        self.assertEqual(missing_state.exception.detail, "Company GST state is required")
+        self.assertEqual(database.list_companies(self.user["id"]), [])
 
     def test_create_company_blocks_missing_or_unreachable_tally_company(self) -> None:
         self.make_agent()
@@ -247,7 +281,7 @@ class Parent2FlowTests(unittest.TestCase):
 
         with patch("backend.services.local_agent_service.dispatch_tally_operation", side_effect=missing_company):
             with self.assertRaises(HTTPException) as missing:
-                routes.create_company(routes.CompanyRequest(company_name="Missing Company"), user=self.user)
+                routes.create_company(self.company_request("Missing Company"), user=self.user)
         self.assertEqual(missing.exception.status_code, 404)
         self.assertEqual(database.list_companies(self.user["id"]), [])
 
@@ -256,7 +290,7 @@ class Parent2FlowTests(unittest.TestCase):
             side_effect=TallyError("Local agent request failed: Tally request failed: connection refused"),
         ):
             with self.assertRaises(HTTPException) as unreachable:
-                routes.create_company(routes.CompanyRequest(company_name="Bhrama Enterprises"), user=self.user)
+                routes.create_company(self.company_request(), user=self.user)
         self.assertEqual(unreachable.exception.status_code, 503)
         self.assertIn("Can't connect to Tally", unreachable.exception.detail)
 
@@ -354,6 +388,115 @@ class Parent2FlowTests(unittest.TestCase):
         self.assertEqual(result["import"]["valid_count"], 1)
         self.assertEqual(result["rows"][0]["validation_status"], "valid")
         self.assertEqual(result["rows"][0]["voucher_preview"]["Date"], "2026-05-04")
+
+    def test_gst_import_preview_calculates_same_state_tax_totals(self) -> None:
+        company = self.make_company()
+        database.update_company(
+            company["id"],
+            self.user["id"],
+            {"supplier_gstin": "29AAECP4424C1ZN", "supplier_state": "Karnataka"},
+        )
+        company = database.get_company(company["id"], user_id=self.user["id"])
+        database.replace_stock_items(
+            [
+                {
+                    "name": "GST Coffee",
+                    "base_unit": "nos",
+                    "gst_rate": 5,
+                    "taxability": "Taxable",
+                    "gst_type": "Goods",
+                }
+            ],
+            company_id=company["id"],
+        )
+        rows = [
+            {
+                "product_name": "GST Coffee",
+                "quantity": 20,
+                "rate": 75,
+                "price": 75,
+                "payment_mode": "Bank Transfer",
+                "voucher_date": "2026-03-01",
+                "buyer_name": "Chanda Enterprises",
+                "buyer_gstin": "29AAACH1004N1ZQ",
+                "buyer_state": "Karnataka",
+                "source_row_id": "2",
+            }
+        ]
+        import_record = database.create_import(self.user["id"], company["id"], "gst-sales.xlsx", rows, import_type=IMPORT_TYPE_GST)
+
+        result = routes.process_import(company["id"], import_record["id"], user=self.user)
+
+        row = result["rows"][0]
+        self.assertEqual(result["import"]["import_type"], IMPORT_TYPE_GST)
+        self.assertEqual(row["validation_status"], "valid")
+        self.assertEqual(row["taxable_amount"], 1500)
+        self.assertEqual(row["cgst_amount"], 37.5)
+        self.assertEqual(row["sgst_amount"], 37.5)
+        self.assertEqual(row["igst_amount"], 0)
+        self.assertEqual(row["total_amount"], 1575)
+        self.assertEqual(row["voucher_preview"]["VoucherKind"], IMPORT_TYPE_GST)
+
+    def test_gst_import_commit_creates_required_ledgers_and_dispatches_gst_voucher(self) -> None:
+        company = self.make_company()
+        agent = self.make_agent()
+        database.update_company(
+            company["id"],
+            self.user["id"],
+            {
+                "local_agent_id": agent["id"],
+                "supplier_gstin": "29AAECP4424C1ZN",
+                "supplier_state": "Karnataka",
+            },
+        )
+        company = database.get_company(company["id"], user_id=self.user["id"])
+        database.replace_stock_items(
+            [{"name": "GST Coffee", "base_unit": "nos", "gst_rate": 5, "hsn_code": "4820", "taxability": "Taxable"}],
+            company_id=company["id"],
+        )
+        database.replace_ledgers([{"name": "Cash", "group": "Cash-in-Hand"}], company_id=company["id"])
+        import_record = database.create_import(
+            self.user["id"],
+            company["id"],
+            "gst-sales.xlsx",
+            [
+                {
+                    "product_name": "GST Coffee",
+                    "quantity": 20,
+                    "rate": 75,
+                    "price": 75,
+                    "payment_mode": "Bank Transfer",
+                    "voucher_date": "2026-03-01",
+                    "buyer_name": "Chanda Enterprises",
+                    "buyer_gstin": "29AAACH1004N1ZQ",
+                    "buyer_state": "Karnataka",
+                    "source_row_id": "2",
+                }
+            ],
+            import_type=IMPORT_TYPE_GST,
+        )
+        routes.process_import(company["id"], import_record["id"], user=self.user)
+        created_ledgers: list[str] = []
+        dispatched_vouchers: list[dict] = []
+
+        def fake_dispatch(agent_arg, operation, payload):
+            if operation == "health_check":
+                return {"status": "connected"}
+            if operation == "create_ledger":
+                created_ledgers.append(payload["name"])
+                return {"STATUS": "1"}
+            if operation == "create_sales_voucher":
+                dispatched_vouchers.append(payload["voucher"])
+                return {"STATUS": "1"}
+            return self.fake_master_dispatch(agent_arg, operation, payload)
+
+        with patch("backend.services.local_agent_service.dispatch_tally_operation", side_effect=fake_dispatch):
+            committed = routes.commit_import(company["id"], import_record["id"], routes.CommitRequest(), user=self.user)
+
+        self.assertEqual(committed["success_count"], 1)
+        self.assertEqual(set(created_ledgers), {"GST Sales", "Chanda Enterprises", "CGST", "SGST"})
+        self.assertEqual(dispatched_vouchers[0]["VoucherKind"], IMPORT_TYPE_GST)
+        self.assertEqual(dispatched_vouchers[0]["InvoiceTotal"], 1575)
 
     def test_company_upi_rows_preview_and_create_fallback_ledger_on_commit(self) -> None:
         company = self.make_company()
