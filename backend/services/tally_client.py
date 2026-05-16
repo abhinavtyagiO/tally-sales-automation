@@ -143,13 +143,16 @@ class TallyClient:
         ]
 
     def get_all_stock_items(self, company_name: str | None = None) -> list[dict[str, Any]]:
-        data = self.export_collection("StockItem", company_name) if company_name else self.export_data("Stock Items")
+        data = self.export_stock_items(company_name) if company_name else self.export_data("Stock Items")
         items = _extract_collection(data, "StockItem")
         return [
             _stock_item_details(item)
             for item in items
             if _text_value(_get_ci(item, "Name") or _find_first(item, "Name"))
         ]
+
+    def export_stock_items(self, company_name: str | None = None) -> dict[str, Any]:
+        return self._post_xml(_stock_items_collection_xml(company_name))
 
     def get_company_name(self) -> str | None:
         data = self.export_data("Company")
@@ -176,6 +179,8 @@ class TallyClient:
         return self._post_xml(_ledger_master_xml(name, group_name, company_name))
 
     def create_sales_voucher(self, voucher: dict[str, Any], company_name: str | None = None) -> dict[str, Any]:
+        if voucher.get("VoucherKind") == "gst_tax_invoice":
+            return self._post_xml(_gst_sales_voucher_xml(voucher, company_name))
         return self._post_xml(_sales_voucher_xml(voucher, company_name))
 
 
@@ -191,6 +196,24 @@ def _find_first(value: Any, key: str) -> Any:
         for item in value:
             found = _find_first(item, key)
             if found is not None:
+                return found
+    return None
+
+
+def _find_first_text(value: Any, key: str) -> str | None:
+    if isinstance(value, dict):
+        for current_key, current_value in value.items():
+            if current_key.lower() == key.lower():
+                text = _text_value(current_value)
+                if text:
+                    return text
+            found = _find_first_text(current_value, key)
+            if found:
+                return found
+    if isinstance(value, list):
+        for item in value:
+            found = _find_first_text(item, key)
+            if found:
                 return found
     return None
 
@@ -256,11 +279,18 @@ def _stock_item_details(item: dict[str, Any]) -> dict[str, Any]:
         "closing_value": _text_value(_get_ci(item, "ClosingValue")),
         "opening_rate": _text_value(_get_ci(item, "OpeningRate")),
         "closing_rate": _text_value(_get_ci(item, "ClosingRate")),
-        "gst_type": _text_value(_get_ci(item, "GSTTypeOfSupply") or _get_ci(item, "GSTOVRDNTYPEOFSUPPLY")),
+        "gst_type": _text_value(_get_ci(item, "GSTTypeOfSupply") or _get_ci(item, "GSTOVRDNTYPEOFSUPPLY") or _find_first(item, "GSTTypeOfSupply")),
         "gst_rate": _extract_gst_rate(item),
-        "hsn_code": _text_value(_get_ci(item, "GSTHSNName") or _get_ci(item, "GSTHSNSACCode")),
-        "hsn_description": _text_value(_get_ci(item, "GSTHSNDescription")),
-        "taxability": _text_value(_get_ci(item, "GSTOVRDNTaxability")),
+        "hsn_code": _text_value(
+            _get_ci(item, "GSTHSNName")
+            or _get_ci(item, "GSTHSNSACCode")
+            or _get_ci(item, "HSNCode")
+            or _find_first_text(item, "GSTHSNName")
+            or _find_first_text(item, "GSTHSNSACCode")
+            or _find_first_text(item, "HSNCode")
+        ),
+        "hsn_description": _text_value(_get_ci(item, "GSTHSNDescription") or _find_first_text(item, "GSTHSNDescription")),
+        "taxability": _text_value(_get_ci(item, "GSTOVRDNTaxability") or _get_ci(item, "Taxability") or _find_first(item, "GSTOVRDNTaxability") or _find_first(item, "Taxability")),
         "raw": item,
     }
 
@@ -422,6 +452,146 @@ def _sales_voucher_xml(voucher: dict[str, Any], company_name: str | None = None)
 </ENVELOPE>"""
 
 
+def _stock_items_collection_xml(company_name: str | None = None) -> str:
+    company_xml = f"<SVCURRENTCOMPANY>{_xml_text(company_name)}</SVCURRENTCOMPANY>" if company_name else ""
+    fetch_fields = ",".join(
+        [
+            "Name",
+            "Parent",
+            "Category",
+            "StockCategory",
+            "BaseUnits",
+            "AdditionalUnits",
+            "OpeningBalance",
+            "ClosingBalance",
+            "OpeningValue",
+            "ClosingValue",
+            "OpeningRate",
+            "ClosingRate",
+            "GSTTypeOfSupply",
+            "GSTOVRDNTYPEOFSUPPLY",
+            "GSTOVRDNTaxability",
+            "GSTHSNName",
+            "GSTHSNSACCode",
+            "GSTHSNDescription",
+            "GSTDetails.*",
+            "GSTDetails.RateDetails.*",
+            "GSTDetails.StateWiseDetails.*",
+            "GSTDetails.StateWiseDetails.RateDetails.*",
+            "HSNDetails.*",
+            "RateDetails.*",
+        ]
+    )
+    return f"""<ENVELOPE>
+  <HEADER>
+    <VERSION>1</VERSION>
+    <TALLYREQUEST>Export</TALLYREQUEST>
+    <TYPE>Collection</TYPE>
+    <ID>AccountPilotStockItems</ID>
+  </HEADER>
+  <BODY>
+    <DESC>
+      <STATICVARIABLES>
+        <SVEXPORTFORMAT>XML</SVEXPORTFORMAT>
+        {company_xml}
+      </STATICVARIABLES>
+      <TDL>
+        <TDLMESSAGE>
+          <COLLECTION NAME="AccountPilotStockItems" ISMODIFY="No">
+            <TYPE>Stock Item</TYPE>
+            <FETCH>{fetch_fields}</FETCH>
+          </COLLECTION>
+        </TDLMESSAGE>
+      </TDL>
+    </DESC>
+  </BODY>
+</ENVELOPE>"""
+
+
+def _gst_sales_voucher_xml(voucher: dict[str, Any], company_name: str | None = None) -> str:
+    voucher_date = _date_yyyymmdd(voucher["Date"])
+    voucher_type = _xml_text(voucher.get("VoucherTypeName", "Sales"))
+    source = voucher.get("Source") or {}
+    voucher_number = _xml_text(f"TSA-GST-{source.get('import_id', 'manual')}-{source.get('import_row_id', '1')}")
+    company_xml = f"<SVCURRENTCOMPANY>{_xml_text(company_name)}</SVCURRENTCOMPANY>" if company_name else ""
+    company_label = company_name or voucher.get("CompanyName") or ""
+    buyer_name = _xml_text(voucher["BuyerName"])
+    buyer_state = _xml_text(voucher["BuyerState"])
+    buyer_gstin = _xml_text(voucher["BuyerGSTIN"])
+    company_state = _xml_text(voucher["CompanyState"])
+    company_gstin = _xml_text(voucher["CompanyGSTIN"])
+    place_of_supply = _xml_text(voucher.get("PlaceOfSupply") or voucher["BuyerState"])
+    registration_name = _xml_text(voucher.get("GSTRegistrationName") or "GST Registration")
+    registration_type = _xml_text(voucher.get("GSTRegistrationType") or "Regular")
+    inventory_entries = "\n".join(_gst_inventory_entry_xml(item) for item in voucher.get("InventoryEntries", []))
+    tax_entries = _gst_tax_ledger_entries_xml(voucher)
+    invoice_total = _xml_amount(-float(voucher["InvoiceTotal"]))
+
+    return f"""<ENVELOPE>
+  <HEADER>
+    <VERSION>1</VERSION>
+    <TALLYREQUEST>Import</TALLYREQUEST>
+    <TYPE>Data</TYPE>
+    <ID>Vouchers</ID>
+  </HEADER>
+  <BODY>
+    <DESC>
+      <STATICVARIABLES>
+        {company_xml}
+        <SVVCHIMPORTFORMAT>XML</SVVCHIMPORTFORMAT>
+        <IMPORTDUPS>@@DUPCOMBINE</IMPORTDUPS>
+      </STATICVARIABLES>
+    </DESC>
+    <DATA>
+      <TALLYMESSAGE xmlns:UDF="TallyUDF">
+        <VOUCHER VCHTYPE="{voucher_type}" ACTION="Create" OBJVIEW="Invoice Voucher View">
+          <DATE>{voucher_date}</DATE>
+          <VCHSTATUSDATE>{voucher_date}</VCHSTATUSDATE>
+          <VOUCHERNUMBER>{voucher_number}</VOUCHERNUMBER>
+          <GSTREGISTRATIONTYPE>{registration_type}</GSTREGISTRATIONTYPE>
+          <STATENAME>{buyer_state}</STATENAME>
+          <COUNTRYOFRESIDENCE>India</COUNTRYOFRESIDENCE>
+          <PARTYGSTIN>{buyer_gstin}</PARTYGSTIN>
+          <PLACEOFSUPPLY>{place_of_supply}</PLACEOFSUPPLY>
+          <VOUCHERTYPENAME>{voucher_type}</VOUCHERTYPENAME>
+          <PARTYNAME>{buyer_name}</PARTYNAME>
+          <GSTREGISTRATION TAXTYPE="GST" TAXREGISTRATION="{company_gstin}">{registration_name}</GSTREGISTRATION>
+          <CMPGSTIN>{company_gstin}</CMPGSTIN>
+          <PARTYLEDGERNAME>{buyer_name}</PARTYLEDGERNAME>
+          <BASICBUYERNAME>{buyer_name}</BASICBUYERNAME>
+          <CMPGSTREGISTRATIONTYPE>{registration_type}</CMPGSTREGISTRATIONTYPE>
+          <PARTYMAILINGNAME>{buyer_name}</PARTYMAILINGNAME>
+          <DISPATCHFROMNAME>{_xml_text(company_label)}</DISPATCHFROMNAME>
+          <DISPATCHFROMSTATENAME>{company_state}</DISPATCHFROMSTATENAME>
+          <CONSIGNEEGSTIN>{buyer_gstin}</CONSIGNEEGSTIN>
+          <CONSIGNEEMAILINGNAME>{buyer_name}</CONSIGNEEMAILINGNAME>
+          <CONSIGNEESTATENAME>{buyer_state}</CONSIGNEESTATENAME>
+          <CMPGSTSTATE>{company_state}</CMPGSTSTATE>
+          <CONSIGNEECOUNTRYNAME>India</CONSIGNEECOUNTRYNAME>
+          <BASICBASEPARTYNAME>{buyer_name}</BASICBASEPARTYNAME>
+          <EFFECTIVEDATE>{voucher_date}</EFFECTIVEDATE>
+          <ISINVOICE>Yes</ISINVOICE>
+          {inventory_entries}
+          <LEDGERENTRIES.LIST>
+            <LEDGERNAME>{buyer_name}</LEDGERNAME>
+            <ISDEEMEDPOSITIVE>Yes</ISDEEMEDPOSITIVE>
+            <ISPARTYLEDGER>Yes</ISPARTYLEDGER>
+            <AMOUNT>{invoice_total}</AMOUNT>
+            <BILLALLOCATIONS.LIST>
+              <NAME>{voucher_number}</NAME>
+              <BILLTYPE>New Ref</BILLTYPE>
+              <TDSDEDUCTEEISSPECIALRATE>No</TDSDEDUCTEEISSPECIALRATE>
+              <AMOUNT>{invoice_total}</AMOUNT>
+            </BILLALLOCATIONS.LIST>
+          </LEDGERENTRIES.LIST>
+          {tax_entries}
+        </VOUCHER>
+      </TALLYMESSAGE>
+    </DATA>
+  </BODY>
+</ENVELOPE>"""
+
+
 def _ledger_master_xml(name: str, group_name: str, company_name: str | None = None) -> str:
     ledger_name = _xml_text(name)
     parent = _xml_text(group_name)
@@ -476,6 +646,80 @@ def _inventory_entry_xml(item: dict[str, Any], sales_ledger_name: str) -> str:
             </ALLINVENTORYENTRIES.LIST>"""
 
 
+def _gst_inventory_entry_xml(item: dict[str, Any]) -> str:
+    stock_item = _xml_text(item["StockItemName"])
+    amount = _xml_amount(item["Amount"])
+    unit = str(item.get("Unit") or "nos")
+    rate = f"{_xml_amount(item.get('Rate', item['Amount']))}/{_xml_text(unit)}"
+    quantity = _xml_quantity_with_unit(item.get("Quantity", 1), unit)
+    sales_ledger = _xml_text(item.get("SalesLedgerName") or "GST Sales")
+    gst_rate = float(item.get("GSTRate") or 0)
+    half_rate = gst_rate / 2
+    return f"""<ALLINVENTORYENTRIES.LIST>
+            <STOCKITEMNAME>{stock_item}</STOCKITEMNAME>
+            <GSTOVRDNISREVCHARGEAPPL>Not Applicable</GSTOVRDNISREVCHARGEAPPL>
+            <GSTOVRDNTAXABILITY>{_xml_text(item.get("Taxability") or "Taxable")}</GSTOVRDNTAXABILITY>
+            <GSTSOURCETYPE>Stock Item</GSTSOURCETYPE>
+            <GSTITEMSOURCE>{stock_item}</GSTITEMSOURCE>
+            <HSNSOURCETYPE>Stock Item</HSNSOURCETYPE>
+            <HSNITEMSOURCE>{stock_item}</HSNITEMSOURCE>
+            <GSTOVRDNTYPEOFSUPPLY>{_xml_text(item.get("GSTType") or "Goods")}</GSTOVRDNTYPEOFSUPPLY>
+            <GSTRATEINFERAPPLICABILITY>As per Masters/Company</GSTRATEINFERAPPLICABILITY>
+            <GSTHSNNAME>{_xml_text(item.get("HSNCode") or "")}</GSTHSNNAME>
+            <GSTHSNINFERAPPLICABILITY>As per Masters/Company</GSTHSNINFERAPPLICABILITY>
+            <ISDEEMEDPOSITIVE>No</ISDEEMEDPOSITIVE>
+            <RATE>{rate}</RATE>
+            <AMOUNT>{amount}</AMOUNT>
+            <ACTUALQTY>{quantity}</ACTUALQTY>
+            <BILLEDQTY>{quantity}</BILLEDQTY>
+            <BATCHALLOCATIONS.LIST>
+              <GODOWNNAME>Main Location</GODOWNNAME>
+              <BATCHNAME>Primary Batch</BATCHNAME>
+              <AMOUNT>{amount}</AMOUNT>
+              <ACTUALQTY>{quantity}</ACTUALQTY>
+              <BILLEDQTY>{quantity}</BILLEDQTY>
+            </BATCHALLOCATIONS.LIST>
+            <ACCOUNTINGALLOCATIONS.LIST>
+              <LEDGERNAME>{sales_ledger}</LEDGERNAME>
+              <ISDEEMEDPOSITIVE>No</ISDEEMEDPOSITIVE>
+              <ISPARTYLEDGER>No</ISPARTYLEDGER>
+              <AMOUNT>{amount}</AMOUNT>
+            </ACCOUNTINGALLOCATIONS.LIST>
+            {_gst_rate_detail_xml("CGST", half_rate)}
+            {_gst_rate_detail_xml("SGST/UTGST", half_rate)}
+            {_gst_rate_detail_xml("IGST", gst_rate)}
+            {_gst_rate_detail_xml("Cess", None)}
+            {_gst_rate_detail_xml("State Cess", 0)}
+          </ALLINVENTORYENTRIES.LIST>"""
+
+
+def _gst_tax_ledger_entries_xml(voucher: dict[str, Any]) -> str:
+    tax = voucher.get("TaxSplit") or {}
+    entries = []
+    for ledger_name, amount in [
+        (voucher.get("CGSTLedgerName"), tax.get("cgst_amount")),
+        (voucher.get("SGSTLedgerName"), tax.get("sgst_amount")),
+        (voucher.get("IGSTLedgerName"), tax.get("igst_amount")),
+    ]:
+        if amount is None or float(amount) <= 0:
+            continue
+        entries.append(_ledger_entry_xml(str(ledger_name), amount))
+    return "\n".join(entries)
+
+
+def _gst_rate_detail_xml(duty_head: str, rate: float | None) -> str:
+    if rate is None:
+        return f"""<RATEDETAILS.LIST>
+              <GSTRATEDUTYHEAD>{_xml_text(duty_head)}</GSTRATEDUTYHEAD>
+              <GSTRATEVALUATIONTYPE>Not Applicable</GSTRATEVALUATIONTYPE>
+            </RATEDETAILS.LIST>"""
+    return f"""<RATEDETAILS.LIST>
+              <GSTRATEDUTYHEAD>{_xml_text(duty_head)}</GSTRATEDUTYHEAD>
+              <GSTRATEVALUATIONTYPE>Based on Value</GSTRATEVALUATIONTYPE>
+              <GSTRATE>{_xml_amount(rate)}</GSTRATE>
+            </RATEDETAILS.LIST>"""
+
+
 def _ledger_entry_xml(ledger_name: str, amount: Any, is_party: bool = False) -> str:
     amount_text = _xml_amount(amount)
     deemed_positive = "Yes" if float(amount) < 0 else "No"
@@ -501,6 +745,16 @@ def _xml_quantity(value: Any) -> str:
     quantity = float(value)
     quantity_text = str(int(quantity)) if quantity.is_integer() else str(quantity)
     return f"{quantity_text} Nos"
+
+
+def _xml_quantity_with_unit(value: Any, unit: str) -> str:
+    quantity = float(value)
+    quantity_text = str(int(quantity)) if quantity.is_integer() else str(quantity)
+    return f"{quantity_text} {_xml_text(unit)}"
+
+
+def _date_yyyymmdd(value: Any) -> str:
+    return str(value).strip().replace("-", "")
 
 
 def _friendly_tally_line_error(message: str) -> str:

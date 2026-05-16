@@ -374,6 +374,16 @@ h3 {
   text-transform: uppercase;
 }
 
+.setup-gst-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 16px;
+}
+
+.setup-gst-grid input {
+  width: 100%;
+}
+
 .lead {
   color: var(--muted);
   font-size: 18px;
@@ -524,9 +534,59 @@ h3 {
   color: #ffffff;
 }
 
+.detail-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 16px;
+}
+
+.detail-grid p {
+  margin: 0;
+  display: grid;
+  gap: 6px;
+}
+
+.detail-grid span {
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.detail-grid strong {
+  font-size: 16px;
+  line-height: 22px;
+}
+
 .upload-layout {
   grid-template-columns: minmax(0, 2fr) minmax(320px, 1fr);
   align-items: start;
+}
+
+.upload-type-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 16px;
+  margin-bottom: 20px;
+}
+
+.upload-type-card {
+  min-height: 112px;
+  padding: 18px;
+  align-content: center;
+  align-items: start;
+  justify-items: start;
+  text-align: left;
+  display: grid;
+  gap: 6px;
+  border-color: var(--border-soft);
+}
+
+.upload-type-card.active {
+  border-color: var(--primary);
+  background: var(--primary-soft);
+}
+
+.upload-type-card span {
+  color: var(--muted);
 }
 
 .upload-picker {

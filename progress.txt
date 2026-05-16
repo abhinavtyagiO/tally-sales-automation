@@ -87,3 +87,22 @@
 - Result: 5 derivation helper tests passed.
 - `env PYTHONPYCACHEPREFIX=/Users/abhinav/Desktop/tally-sales-automation-mvp/.pycache .venv/bin/python -m unittest discover -s tests`
 - Result: 31 tests passed.
+
+## GST Tax Invoice Upload PRD #24 Progress
+
+- Issue #25: Added explicit Retail Sales and GST Tax Invoice import type selection in the upload UI and persisted import type on backend import records.
+- Issue #26: Added company GST configuration fields for supplier GSTIN/state, GST registration metadata, GST sales ledger, CGST/SGST/IGST ledgers, and buyer ledger grouping.
+- Issue #27: Added GST Excel parsing and row validation for buyer name, buyer GSTIN, buyer state, product, quantity, rate, payment mode, and voucher date.
+- Issue #28: Added GST invoice preview totals including taxable amount, GST rate, CGST/SGST/IGST amounts, invoice total, buyer name, and GSTIN.
+- Issue #29: Added a GST invoice voucher builder and Tally XML contract using Invoice Voucher View, `ISINVOICE=Yes`, buyer/company GST fields, inventory entries, rate details, bill allocation, and tax ledger entries.
+- Issue #30: Added GST invoice commit through the local connector, including creation/reuse of GST sales, buyer, and tax ledgers before dispatch.
+- Issue #31: Updated upload UX, history, preview rows, summary totals, and templates so retail and GST uploads stay distinct while sharing the same import lifecycle.
+
+## GST Tax Invoice Upload PRD #24 Verification
+
+- `.venv/bin/python -m unittest discover -s tests`
+- Result: 37 tests passed.
+- `cd frontend && pnpm run test:derivations`
+- Result: 6 derivation helper tests passed.
+- `cd frontend && pnpm run build`
+- Result: Next.js 16.2.4 production build passed.

@@ -5,7 +5,7 @@ import logging
 import sqlite3
 from typing import Any, Optional
 
-from fastapi import APIRouter, Depends, File, HTTPException, Request, Response, UploadFile
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, Response, UploadFile
 from pydantic import BaseModel, Field
 
 from backend import config
@@ -13,6 +13,15 @@ from backend.db import database
 from backend.services import auth_service, local_agent_service
 from backend.services.company_service import company_has_online_agent, require_company
 from backend.services.excel_parser import ExcelParseError, parse_excel
+from backend.services.gst_invoice import (
+    IMPORT_TYPE_GST,
+    IMPORT_TYPE_RETAIL,
+    GstInvoiceError,
+    build_gst_invoices,
+    normalize_import_type,
+    required_gst_ledgers_for_rows,
+    validate_gstin,
+)
 from backend.services.sync_service import get_cache_snapshot, get_company_cache_snapshot, sync_from_tally
 from backend.services.tally_client import TallyClient, TallyError
 from backend.services.tally_status_service import ensure_tally_reachable, get_tally_status, list_tally_companies
@@ -35,6 +44,15 @@ class PaymentLedgerConfig(BaseModel):
 class CompanyRequest(BaseModel):
     company_name: str
     tally_url: str = config.TALLY_URL
+    supplier_gstin: Optional[str] = None
+    supplier_state: Optional[str] = None
+    gst_registration_name: str = config.GST_REGISTRATION_NAME
+    gst_registration_type: str = config.GST_REGISTRATION_TYPE
+    gst_sales_ledger_name: str = config.GST_SALES_LEDGER_NAME
+    cgst_ledger_name: str = config.CGST_LEDGER_NAME
+    sgst_ledger_name: str = config.SGST_LEDGER_NAME
+    igst_ledger_name: str = config.IGST_LEDGER_NAME
+    gst_buyer_ledger_group: str = config.GST_BUYER_LEDGER_GROUP
     sales_ledger_name: str = config.SALES_LEDGER_NAME
     sales_ledger_group_name: str = config.SALES_LEDGER_GROUP
     cash_ledger_name: str = config.CASH_LEDGER_NAME
@@ -49,6 +67,15 @@ class CompanyRequest(BaseModel):
 class CompanyUpdateRequest(BaseModel):
     company_name: Optional[str] = None
     tally_url: Optional[str] = None
+    supplier_gstin: Optional[str] = None
+    supplier_state: Optional[str] = None
+    gst_registration_name: Optional[str] = None
+    gst_registration_type: Optional[str] = None
+    gst_sales_ledger_name: Optional[str] = None
+    cgst_ledger_name: Optional[str] = None
+    sgst_ledger_name: Optional[str] = None
+    igst_ledger_name: Optional[str] = None
+    gst_buyer_ledger_group: Optional[str] = None
     sales_ledger_name: Optional[str] = None
     sales_ledger_group_name: Optional[str] = None
     cash_ledger_name: Optional[str] = None
@@ -131,9 +158,17 @@ def list_companies(user: dict[str, Any] = Depends(auth_service.get_current_user)
 @router.post("/companies")
 def create_company(request: CompanyRequest, user: dict[str, Any] = Depends(auth_service.get_current_user)) -> dict[str, Any]:
     company_name = request.company_name.strip()
+    supplier_gstin = (request.supplier_gstin or "").strip().upper()
+    supplier_state = (request.supplier_state or "").strip()
     logger.info("company.create.start user_id=%s company_name=%s", user["id"], company_name)
     if not company_name:
         raise HTTPException(status_code=400, detail="Company name is required")
+    if not supplier_gstin:
+        raise HTTPException(status_code=400, detail="Company GSTIN is required")
+    if not validate_gstin(supplier_gstin):
+        raise HTTPException(status_code=400, detail="Company GSTIN must be a valid GSTIN")
+    if not supplier_state:
+        raise HTTPException(status_code=400, detail="Company GST state is required")
     if any(company["company_name"].lower() == company_name.lower() for company in database.list_companies(user["id"])):
         raise HTTPException(status_code=409, detail="This company is already added")
 
@@ -144,6 +179,8 @@ def create_company(request: CompanyRequest, user: dict[str, Any] = Depends(auth_
         data = _model_to_dict(request)
         data["company_name"] = company_name
         data["tally_url"] = request.tally_url
+        data["supplier_gstin"] = supplier_gstin
+        data["supplier_state"] = supplier_state
         data["local_agent_id"] = agent["id"]
         company = database.create_company(user["id"], data)
         selected = database.select_company(company["id"], user["id"])
@@ -285,9 +322,11 @@ def company_stock_items(company_id: int, user: dict[str, Any] = Depends(auth_ser
 async def upload_company_excel(
     company_id: int,
     file: UploadFile = File(...),
+    import_type: str = Form(IMPORT_TYPE_RETAIL),
     user: dict[str, Any] = Depends(auth_service.get_current_user),
 ) -> dict[str, Any]:
     company = require_company(user["id"], company_id)
+    normalized_import_type = _normalize_import_type_or_400(import_type)
     agent = _active_tally_agent(user["id"])
     try:
         logger.info("import.upload.sync_start user_id=%s company_id=%s filename=%s", user["id"], company_id, file.filename)
@@ -296,11 +335,11 @@ async def upload_company_excel(
         logger.warning("import.upload.sync_failed user_id=%s company_id=%s filename=%s error=%r", user["id"], company_id, file.filename, exc)
         raise _friendly_tally_exception(exc) from exc
     company = database.get_company(company_id, user_id=user["id"])
-    rows = await _parse_upload(file)
-    import_record = database.create_import(user["id"], company_id, file.filename, rows)
+    rows = await _parse_upload(file, normalized_import_type)
+    import_record = database.create_import(user["id"], company_id, file.filename, rows, import_type=normalized_import_type)
     try:
         processed = _process_import_rows(company, import_record["id"], user)
-    except VoucherBuildError as exc:
+    except (VoucherBuildError, GstInvoiceError) as exc:
         logger.warning("import.upload.validation_failed user_id=%s company_id=%s import_id=%s error=%r", user["id"], company_id, import_record["id"], exc)
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     logger.info("import.upload.success user_id=%s company_id=%s import_id=%s rows=%s", user["id"], company_id, import_record["id"], len(rows))
@@ -334,7 +373,8 @@ def commit_import(
     except TallyError as exc:
         logger.warning("import.commit.tally_unreachable user_id=%s company_id=%s import_id=%s error=%r", user["id"], company_id, import_id, exc)
         raise _friendly_tally_exception(exc) from exc
-    if not database.get_import(import_id, user["id"], company_id):
+    import_record = database.get_import(import_id, user["id"], company_id)
+    if not import_record:
         raise HTTPException(status_code=404, detail="Import not found")
     rows = [
         row
@@ -343,14 +383,20 @@ def commit_import(
         and row["commit_status"] != "success"
         and (not request.import_row_ids or row["id"] in request.import_row_ids)
     ]
-    _ensure_company_commit_ledgers(company, agent, rows)
-    result = build_vouchers([_row_to_sale(row) for row in rows], ensure_ledgers=False, company=company, user_id=user["id"])
+    is_gst = normalize_import_type(import_record.get("import_type")) == IMPORT_TYPE_GST
+    if is_gst:
+        _ensure_company_gst_commit_ledgers(company, agent, rows)
+        result = build_gst_invoices([_row_to_gst(row) for row in rows], company=company, user_id=user["id"])
+    else:
+        _ensure_company_commit_ledgers(company, agent, rows)
+        result = build_vouchers([_row_to_sale(row) for row in rows], ensure_ledgers=False, company=company, user_id=user["id"])
     results: list[dict[str, Any]] = []
     logger.info("import.commit.start user_id=%s company_id=%s import_id=%s row_count=%s", user["id"], company_id, import_id, len(rows))
     for voucher in result.vouchers:
         import_row_id = voucher["Source"]["import_row_id"]
         try:
-            validate_voucher(voucher)
+            if not is_gst:
+                validate_voucher(voucher)
             response = local_agent_service.dispatch_tally_operation(
                 agent,
                 "create_sales_voucher",
@@ -360,7 +406,7 @@ def commit_import(
             database.update_import_row_commit(import_row_id, "success", None, response)
             results.append({"import_row_id": import_row_id, "status": "success", "response": response})
             logger.info("import.commit.row_success user_id=%s company_id=%s import_id=%s row_id=%s", user["id"], company_id, import_id, import_row_id)
-        except (TallyError, VoucherBuildError, ValueError) as exc:
+        except (TallyError, VoucherBuildError, GstInvoiceError, ValueError) as exc:
             database.log_voucher(voucher, {"error": str(exc)}, "failed", source=voucher.get("Source"))
             database.update_import_row_commit(import_row_id, "failed", str(exc))
             results.append({"import_row_id": import_row_id, "status": "failed", "error": str(exc)})
@@ -475,13 +521,20 @@ def cache() -> dict[str, Any]:
     return get_cache_snapshot()
 
 
-async def _parse_upload(file: UploadFile) -> list[dict[str, Any]]:
+async def _parse_upload(file: UploadFile, import_type: str = IMPORT_TYPE_RETAIL) -> list[dict[str, Any]]:
     if not file.filename or not file.filename.lower().endswith((".xlsx", ".xls")):
         raise HTTPException(status_code=400, detail="Only .xlsx or .xls files are supported")
     content = await file.read()
     try:
-        return parse_excel(content)
+        return parse_excel(content, import_type=import_type)
     except ExcelParseError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+def _normalize_import_type_or_400(import_type: str | None) -> str:
+    try:
+        return normalize_import_type(import_type)
+    except GstInvoiceError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
@@ -511,9 +564,34 @@ def _row_to_sale(row: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _row_to_gst(row: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "product_name": row["product_name"],
+        "price": row["price"],
+        "quantity": row["quantity"],
+        "rate": row["rate"] if row.get("rate") is not None else row["price"],
+        "payment_mode": row["payment_mode"],
+        "voucher_date": row["voucher_date"],
+        "buyer_name": row.get("buyer_name"),
+        "buyer_gstin": row.get("buyer_gstin"),
+        "buyer_state": row.get("buyer_state"),
+        "buyer_address": row.get("buyer_address"),
+        "place_of_supply": row.get("place_of_supply"),
+        "source_row_id": row["source_row_id"],
+        "import_id": row["import_id"],
+        "import_row_id": row["id"],
+    }
+
+
 def _process_import_rows(company: dict[str, Any], import_id: int, user: dict[str, Any]) -> dict[str, Any]:
+    import_record = database.get_import(import_id, user["id"], company["id"])
+    if not import_record:
+        raise HTTPException(status_code=404, detail="Import not found")
     rows = database.list_import_rows(import_id, company["id"])
-    result = build_vouchers([_row_to_sale(row) for row in rows], ensure_ledgers=False, company=company, user_id=user["id"])
+    if normalize_import_type(import_record.get("import_type")) == IMPORT_TYPE_GST:
+        result = build_gst_invoices([_row_to_gst(row) for row in rows], company=company, user_id=user["id"])
+    else:
+        result = build_vouchers([_row_to_sale(row) for row in rows], ensure_ledgers=False, company=company, user_id=user["id"])
     vouchers_by_row = {voucher["Source"]["import_row_id"]: voucher for voucher in result.vouchers}
     errors_by_row = {
         rows[item["row"]]["id"]: item["error"]
@@ -524,6 +602,8 @@ def _process_import_rows(company: dict[str, Any], import_id: int, user: dict[str
         voucher = vouchers_by_row.get(row["id"])
         error = errors_by_row.get(row["id"])
         database.update_import_row_validation(row["id"], "valid" if voucher else "invalid", error, voucher)
+        if voucher and normalize_import_type(import_record.get("import_type")) == IMPORT_TYPE_GST:
+            database.update_import_row_gst_totals(row["id"], voucher)
     database.update_import_counts(import_id)
     return {
         "import": database.get_import(import_id, user["id"], company["id"]),
@@ -538,6 +618,26 @@ def _ensure_company_commit_ledgers(company: dict[str, Any], agent: dict[str, Any
         if database.get_ledger_by_name(ledger_name, company_id=company["id"]):
             continue
         logger.info("import.commit.create_missing_ledger company_id=%s ledger_name=%s group_name=%s", company["id"], ledger_name, group_name)
+        local_agent_service.dispatch_tally_operation(
+            agent,
+            "create_ledger",
+            {
+                "name": ledger_name,
+                "group_name": group_name,
+                "company_name": company["company_name"],
+                "tally_url": company["tally_url"],
+            },
+        )
+        database.upsert_ledger(ledger_name, group_name, company_id=company["id"])
+
+
+def _ensure_company_gst_commit_ledgers(company: dict[str, Any], agent: dict[str, Any], rows: list[dict[str, Any]]) -> None:
+    for ledger in required_gst_ledgers_for_rows([_row_to_gst(row) for row in rows], company):
+        ledger_name = ledger["ledger_name"]
+        group_name = ledger["group_name"]
+        if database.get_ledger_by_name(ledger_name, company_id=company["id"]):
+            continue
+        logger.info("import.commit.create_missing_gst_ledger company_id=%s ledger_name=%s group_name=%s", company["id"], ledger_name, group_name)
         local_agent_service.dispatch_tally_operation(
             agent,
             "create_ledger",

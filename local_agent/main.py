@@ -41,6 +41,7 @@ def execute(request: ExecuteRequest, x_accountpilot_agent_token: Optional[str] =
             if collection_id.lower() == "ledger":
                 return {"ledgers": client.get_all_ledgers(company_name), "raw": data}
             if collection_id.lower() == "stockitem":
+                data = client.export_stock_items(company_name)
                 return {"stock_items": [_stock_item_details(item) for item in _extract_collection(data, "StockItem")], "raw": data}
             return {"raw": data}
         if request.operation == "create_sales_voucher":
