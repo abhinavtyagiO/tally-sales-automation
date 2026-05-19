@@ -19,10 +19,13 @@ def _load_local_env() -> None:
 _load_local_env()
 
 APP_ENV = os.getenv("APP_ENV", "development").lower()
+DATABASE_URL = os.getenv("DATABASE_URL", "")
+SQLITE_DB_PATH = os.getenv("SQLITE_DB_PATH", "")
 
 TALLY_URL = os.getenv("TALLY_URL", "http://127.0.0.1:9000")
 TALLY_TRANSPORT = os.getenv("TALLY_TRANSPORT", "xml").lower()
 LOCAL_AGENT_URL = os.getenv("LOCAL_AGENT_URL", "http://localhost:9100")
+CONNECTOR_MODE = os.getenv("CONNECTOR_MODE", "direct").lower()
 LOCAL_AGENT_BOOTSTRAP_ENABLED = os.getenv("LOCAL_AGENT_BOOTSTRAP_ENABLED", "true" if APP_ENV != "production" else "false").lower() == "true"
 LOCAL_AGENT_TOKEN = os.getenv("LOCAL_AGENT_TOKEN", "")
 LEGACY_ENDPOINTS_ENABLED = os.getenv("LEGACY_ENDPOINTS_ENABLED", "true" if APP_ENV != "production" else "false").lower() == "true"
@@ -52,3 +55,23 @@ CGST_LEDGER_NAME = os.getenv("CGST_LEDGER_NAME", "CGST")
 SGST_LEDGER_NAME = os.getenv("SGST_LEDGER_NAME", "SGST")
 IGST_LEDGER_NAME = os.getenv("IGST_LEDGER_NAME", "IGST")
 GST_BUYER_LEDGER_GROUP = os.getenv("GST_BUYER_LEDGER_GROUP", "Sundry Debtors")
+
+
+def _validate_runtime_config() -> None:
+    if APP_ENV != "production":
+        return
+    if CONNECTOR_MODE != "polling":
+        raise RuntimeError("Production must use CONNECTOR_MODE=polling")
+    if LOCAL_AGENT_BOOTSTRAP_ENABLED:
+        raise RuntimeError("Production must set LOCAL_AGENT_BOOTSTRAP_ENABLED=false")
+    if ALLOW_DEV_AUTH:
+        raise RuntimeError("Production must set ALLOW_DEV_AUTH=false")
+    if not GOOGLE_CLIENT_ID:
+        raise RuntimeError("Production must set GOOGLE_CLIENT_ID")
+    if not COOKIE_SECURE:
+        raise RuntimeError("Production must set COOKIE_SECURE=true")
+    if COOKIE_SAMESITE not in {"none", "lax", "strict"}:
+        raise RuntimeError("COOKIE_SAMESITE must be one of: none, lax, strict")
+
+
+_validate_runtime_config()

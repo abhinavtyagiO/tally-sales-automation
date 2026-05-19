@@ -271,6 +271,16 @@ class MvpFlowTests(unittest.TestCase):
 
         self.assertIn("data", sent)
         self.assertNotIn("Source", sent["data"])
+        self.assertIn('OBJVIEW="Invoice Voucher View"', sent["data"])
+        self.assertIn("<ISINVOICE>Yes</ISINVOICE>", sent["data"])
+        self.assertIn("<ALLINVENTORYENTRIES.LIST>", sent["data"])
+        self.assertIn("<STOCKITEMNAME>2.75-18 NGP</STOCKITEMNAME>", sent["data"])
+        self.assertIn("<SVVCHIMPORTFORMAT>XML</SVVCHIMPORTFORMAT>", sent["data"])
+        self.assertIn("<RATE>1600.00/nos</RATE>", sent["data"])
+        self.assertIn("<BILLEDQTY>1 nos</BILLEDQTY>", sent["data"])
+        self.assertIn("<BATCHALLOCATIONS.LIST>", sent["data"])
+        self.assertIn("<ACCOUNTINGALLOCATIONS.LIST>", sent["data"])
+        self.assertIn("<LEDGERNAME>Sales</LEDGERNAME>", sent["data"])
         self.assertIn("ENVELOPE", result)
 
     def test_tally_client_surfaces_xml_line_errors(self) -> None:

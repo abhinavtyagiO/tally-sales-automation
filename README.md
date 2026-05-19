@@ -23,7 +23,9 @@ The production model is frontend/backend plus a local connector. The backend doe
 
 The local connector runs on the machine or office LAN where TallyPrime is available. User-facing UI should describe this only as the Tally connection. Normal users should not see pairing tokens, connector URLs, local ports, or manual connector setup steps.
 
-In local development, the backend can bootstrap a connector at `LOCAL_AGENT_URL=http://localhost:9100`. In production, disable this with `LOCAL_AGENT_BOOTSTRAP_ENABLED=false`. A cloud backend cannot reach a user's `localhost`; the connector must register a backend-reachable HTTPS `base_url`, usually through the packaged connector's tunnel/relay layer. The backend then calls that connector URL, and the connector calls Tally at its own local `TALLY_URL` such as `http://127.0.0.1:9000`.
+In local development, set `CONNECTOR_MODE=direct` and point `TALLY_URL` at the reachable Tally server. In production, set `CONNECTOR_MODE=polling` and disable bootstrap with `LOCAL_AGENT_BOOTSTRAP_ENABLED=false`. A cloud backend cannot reach a user's `localhost`; AccountPilot Helper should use outbound HTTPS to poll the cloud backend, then call Tally at its own local `TALLY_URL` such as `http://127.0.0.1:9000`.
+
+The frontend mirrors this split. With no helper download URL and no `NEXT_PUBLIC_CONNECTOR_MODE=polling`, local development stays in direct mode and skips the AccountPilot Helper download prompt.
 
 The Tally URL is stored with the company but is evaluated by the connector machine. Do not configure production backend `TALLY_URL` to a developer LAN IP such as `192.168.x.x`.
 
@@ -58,12 +60,15 @@ Backend production requirements:
 - `COOKIE_SAMESITE=none` when frontend and API are on different sites; use `lax` when they share the same site.
 - `LOCAL_AGENT_BOOTSTRAP_ENABLED=false`
 - `LEGACY_ENDPOINTS_ENABLED=false`
+- `CONNECTOR_MODE=polling`
 
 Frontend production requirements:
 
 - `NEXT_PUBLIC_API_URL=https://<backend-domain>`
 - `NEXT_PUBLIC_GOOGLE_CLIENT_ID=<same google oauth client id>`
 - `NEXT_PUBLIC_ENABLE_DEV_LOGIN=false`
+- `NEXT_PUBLIC_CONNECTOR_MODE=polling`
+- `NEXT_PUBLIC_HELPER_DOWNLOAD_URL=https://<download-domain>/AccountPilotHelperSetup.exe`
 
 Local connector production requirements:
 

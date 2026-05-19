@@ -12,18 +12,23 @@ from backend.services.tally_client import TallyClient
 def sync_from_tally(client: TallyClient | None = None, company: dict[str, Any] | None = None, agent: dict[str, Any] | None = None) -> dict[str, Any]:
     tally = client or TallyClient()
     if company and agent:
-        ledgers_response = local_agent_service.dispatch_tally_operation(
-            agent,
-            "export_collection",
-            {"collection_id": "Ledger", "company_name": company["company_name"], "tally_url": company["tally_url"]},
-        )
-        stock_response = local_agent_service.dispatch_tally_operation(
-            agent,
-            "export_collection",
-            {"collection_id": "StockItem", "company_name": company["company_name"], "tally_url": company["tally_url"]},
-        )
-        ledgers = _extract_agent_ledgers(ledgers_response)
-        stock_items = _extract_agent_stock_items(stock_response)
+        if agent.get("direct_tally"):
+            company_tally = TallyClient(company.get("tally_url") or config.TALLY_URL)
+            ledgers = company_tally.get_all_ledgers(company["company_name"])
+            stock_items = company_tally.get_all_stock_items(company["company_name"])
+        else:
+            ledgers_response = local_agent_service.dispatch_tally_operation(
+                agent,
+                "export_collection",
+                {"collection_id": "Ledger", "company_name": company["company_name"], "tally_url": company["tally_url"]},
+            )
+            stock_response = local_agent_service.dispatch_tally_operation(
+                agent,
+                "export_collection",
+                {"collection_id": "StockItem", "company_name": company["company_name"], "tally_url": company["tally_url"]},
+            )
+            ledgers = _extract_agent_ledgers(ledgers_response)
+            stock_items = _extract_agent_stock_items(stock_response)
         company_name = company["company_name"]
         company_id = company["id"]
     else:

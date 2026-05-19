@@ -11,7 +11,7 @@ from backend import config
 
 
 BASE_DIR = Path(__file__).resolve().parents[1]
-DB_PATH = BASE_DIR / "tally_sales.db"
+DB_PATH = Path(config.SQLITE_DB_PATH).expanduser() if config.SQLITE_DB_PATH else BASE_DIR / "tally_sales.db"
 
 
 def utc_now() -> str:
@@ -58,6 +58,9 @@ def init_db() -> None:
                 auth_token TEXT,
                 pairing_status TEXT NOT NULL DEFAULT 'pending',
                 last_seen_at TEXT,
+                last_activity_at TEXT,
+                last_error TEXT,
+                setup_expires_at TEXT,
                 created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                 revoked_at TEXT,
                 FOREIGN KEY (user_id) REFERENCES users(id)
@@ -194,6 +197,48 @@ def init_db() -> None:
                 FOREIGN KEY (import_row_id) REFERENCES import_rows(id)
             );
 
+            CREATE TABLE IF NOT EXISTS connector_jobs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL,
+                company_id INTEGER,
+                agent_id INTEGER NOT NULL,
+                commit_run_id INTEGER,
+                operation TEXT NOT NULL,
+                payload_json TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'queued',
+                attempt_count INTEGER NOT NULL DEFAULT 0,
+                available_after TEXT,
+                lease_expires_at TEXT,
+                result_json TEXT,
+                error_message TEXT,
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                completed_at TEXT,
+                FOREIGN KEY (user_id) REFERENCES users(id),
+                FOREIGN KEY (company_id) REFERENCES companies(id) ON DELETE CASCADE,
+                FOREIGN KEY (commit_run_id) REFERENCES commit_runs(id) ON DELETE CASCADE,
+                FOREIGN KEY (agent_id) REFERENCES local_agents(id)
+            );
+
+            CREATE TABLE IF NOT EXISTS commit_runs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL,
+                company_id INTEGER NOT NULL,
+                import_id INTEGER NOT NULL,
+                status TEXT NOT NULL DEFAULT 'queued',
+                total_count INTEGER NOT NULL DEFAULT 0,
+                success_count INTEGER NOT NULL DEFAULT 0,
+                failed_count INTEGER NOT NULL DEFAULT 0,
+                result_json TEXT,
+                error_message TEXT,
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                completed_at TEXT,
+                FOREIGN KEY (user_id) REFERENCES users(id),
+                FOREIGN KEY (company_id) REFERENCES companies(id) ON DELETE CASCADE,
+                FOREIGN KEY (import_id) REFERENCES imports(id) ON DELETE CASCADE
+            );
+
             CREATE TABLE IF NOT EXISTS metadata (
                 key TEXT PRIMARY KEY,
                 value TEXT NOT NULL
@@ -214,6 +259,18 @@ def init_db() -> None:
 
             CREATE INDEX IF NOT EXISTS idx_vouchers_log_company_fingerprint
             ON vouchers_log(company_id, source_fingerprint);
+
+            CREATE INDEX IF NOT EXISTS idx_connector_jobs_agent_status
+            ON connector_jobs(agent_id, status, available_after, id);
+
+            CREATE INDEX IF NOT EXISTS idx_connector_jobs_company_operation
+            ON connector_jobs(company_id, operation, created_at);
+
+            CREATE INDEX IF NOT EXISTS idx_connector_jobs_commit_run
+            ON connector_jobs(commit_run_id, status, id);
+
+            CREATE INDEX IF NOT EXISTS idx_commit_runs_import_status
+            ON commit_runs(company_id, import_id, status, id);
             """
         )
 
@@ -243,6 +300,9 @@ def _migrate_existing_tables(connection: sqlite3.Connection) -> None:
         ("vouchers_log", "source_row_id", "TEXT"),
         ("vouchers_log", "source_fingerprint", "TEXT"),
         ("local_agents", "auth_token", "TEXT"),
+        ("local_agents", "last_activity_at", "TEXT"),
+        ("local_agents", "last_error", "TEXT"),
+        ("local_agents", "setup_expires_at", "TEXT"),
         ("stock_items", "group_name", "TEXT"),
         ("stock_items", "category", "TEXT"),
         ("stock_items", "base_unit", "TEXT"),
@@ -273,6 +333,7 @@ def _migrate_existing_tables(connection: sqlite3.Connection) -> None:
         ("import_rows", "sgst_amount", "REAL"),
         ("import_rows", "igst_amount", "REAL"),
         ("import_rows", "total_amount", "REAL"),
+        ("connector_jobs", "commit_run_id", "INTEGER"),
     ]:
         _ensure_column(connection, table, column, definition)
     connection.execute("UPDATE companies SET sales_ledger_group_name = COALESCE(sales_ledger_group_name, ?) ", (config.SALES_LEDGER_GROUP,))
@@ -605,14 +666,21 @@ def set_company_sync(company_id: int, status: str, synced_at: str | None = None)
         )
 
 
-def create_pairing_token(user_id: int, device_name: str, token_hash: str, base_url: str | None = None, auth_token: str | None = None) -> dict[str, Any]:
+def create_pairing_token(
+    user_id: int,
+    device_name: str,
+    token_hash: str,
+    base_url: str | None = None,
+    auth_token: str | None = None,
+    setup_expires_at: str | None = None,
+) -> dict[str, Any]:
     with get_connection() as connection:
         cursor = connection.execute(
             """
-            INSERT INTO local_agents (user_id, device_name, base_url, pairing_token_hash, auth_token)
-            VALUES (?, ?, ?, ?, ?)
+            INSERT INTO local_agents (user_id, device_name, base_url, pairing_token_hash, auth_token, setup_expires_at)
+            VALUES (?, ?, ?, ?, ?, ?)
             """,
-            (user_id, device_name, base_url, token_hash, auth_token),
+            (user_id, device_name, base_url, token_hash, auth_token, setup_expires_at),
         )
         return get_local_agent(cursor.lastrowid, user_id=user_id, connection=connection)
 
@@ -624,8 +692,9 @@ def pair_local_agent(token_hash: str, device_name: str | None = None, base_url: 
             SELECT * FROM local_agents
             WHERE pairing_token_hash = ?
               AND revoked_at IS NULL
+              AND (setup_expires_at IS NULL OR setup_expires_at > ?)
             """,
-            (token_hash,),
+            (token_hash, utc_now()),
         ).fetchone()
         if not row:
             return None
@@ -654,6 +723,19 @@ def heartbeat_local_agent(agent_id: int, user_id: int | None = None, base_url: s
             (utc_now(), base_url, agent_id),
         )
         return get_local_agent(agent_id, user_id=user_id, connection=connection)
+
+
+def update_local_agent_activity(agent_id: int, error_message: str | None = None) -> None:
+    with get_connection() as connection:
+        connection.execute(
+            """
+            UPDATE local_agents
+            SET last_activity_at = ?,
+                last_error = ?
+            WHERE id = ?
+            """,
+            (utc_now(), error_message, agent_id),
+        )
 
 
 def revoke_local_agent(agent_id: int, user_id: int) -> bool:
@@ -699,6 +781,202 @@ def get_active_local_agent(user_id: int) -> dict[str, Any] | None:
             (user_id,),
         ).fetchone()
         return dict(row) if row else None
+
+
+def get_latest_local_agent(user_id: int) -> dict[str, Any] | None:
+    with get_connection() as connection:
+        row = connection.execute(
+            """
+            SELECT * FROM local_agents
+            WHERE user_id = ?
+              AND revoked_at IS NULL
+            ORDER BY
+              CASE WHEN last_seen_at IS NULL THEN 1 ELSE 0 END,
+              last_seen_at DESC,
+              id DESC
+            LIMIT 1
+            """,
+            (user_id,),
+        ).fetchone()
+        return dict(row) if row else None
+
+
+def create_connector_job(
+    user_id: int,
+    company_id: int | None,
+    agent_id: int,
+    operation: str,
+    payload: dict[str, Any],
+    available_after: str | None = None,
+    commit_run_id: int | None = None,
+) -> dict[str, Any]:
+    now = utc_now()
+    with get_connection() as connection:
+        cursor = connection.execute(
+            """
+            INSERT INTO connector_jobs (
+                user_id, company_id, agent_id, commit_run_id, operation, payload_json,
+                status, available_after, created_at, updated_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, 'queued', ?, ?, ?)
+            """,
+            (user_id, company_id, agent_id, commit_run_id, operation, json.dumps(payload), available_after, now, now),
+        )
+        return get_connector_job(cursor.lastrowid, connection=connection)
+
+
+def get_connector_job(job_id: int, connection: sqlite3.Connection | None = None) -> dict[str, Any] | None:
+    close = connection is None
+    connection = connection or get_connection()
+    try:
+        row = connection.execute("SELECT * FROM connector_jobs WHERE id = ?", (job_id,)).fetchone()
+        return _decode_connector_job(dict(row)) if row else None
+    finally:
+        if close:
+            connection.close()
+
+
+def lease_next_connector_job(agent_id: int, lease_expires_at: str) -> dict[str, Any] | None:
+    now = utc_now()
+    with get_connection() as connection:
+        row = connection.execute(
+            """
+            SELECT * FROM connector_jobs
+            WHERE agent_id = ?
+              AND status = 'queued'
+              AND (available_after IS NULL OR available_after <= ?)
+            ORDER BY id
+            LIMIT 1
+            """,
+            (agent_id, now),
+        ).fetchone()
+        if not row:
+            return None
+        job_id = int(row["id"])
+        connection.execute(
+            """
+            UPDATE connector_jobs
+            SET status = 'leased',
+                attempt_count = attempt_count + 1,
+                lease_expires_at = ?,
+                updated_at = ?
+            WHERE id = ? AND status = 'queued'
+            """,
+            (lease_expires_at, now, job_id),
+        )
+        return get_connector_job(job_id, connection=connection)
+
+
+def complete_connector_job(job_id: int, agent_id: int, result: dict[str, Any] | None = None) -> dict[str, Any] | None:
+    now = utc_now()
+    with get_connection() as connection:
+        cursor = connection.execute(
+            """
+            UPDATE connector_jobs
+            SET status = 'completed',
+                result_json = ?,
+                error_message = NULL,
+                completed_at = ?,
+                updated_at = ?
+            WHERE id = ? AND agent_id = ? AND status = 'leased'
+            """,
+            (json.dumps(result or {}), now, now, job_id, agent_id),
+        )
+        if cursor.rowcount == 0:
+            return None
+        return get_connector_job(job_id, connection=connection)
+
+
+def fail_connector_job(job_id: int, agent_id: int, error_message: str, result: dict[str, Any] | None = None) -> dict[str, Any] | None:
+    now = utc_now()
+    with get_connection() as connection:
+        cursor = connection.execute(
+            """
+            UPDATE connector_jobs
+            SET status = 'failed',
+                result_json = ?,
+                error_message = ?,
+                completed_at = ?,
+                updated_at = ?
+            WHERE id = ? AND agent_id = ? AND status = 'leased'
+            """,
+            (json.dumps(result or {}), error_message, now, now, job_id, agent_id),
+        )
+        if cursor.rowcount == 0:
+            return None
+        return get_connector_job(job_id, connection=connection)
+
+
+def get_latest_connector_job(company_id: int, operation: str) -> dict[str, Any] | None:
+    with get_connection() as connection:
+        row = connection.execute(
+            """
+            SELECT * FROM connector_jobs
+            WHERE company_id = ? AND operation = ?
+            ORDER BY id DESC
+            LIMIT 1
+            """,
+            (company_id, operation),
+        ).fetchone()
+        return _decode_connector_job(dict(row)) if row else None
+
+
+def get_latest_connector_job_for_user(user_id: int, operation: str) -> dict[str, Any] | None:
+    with get_connection() as connection:
+        row = connection.execute(
+            """
+            SELECT * FROM connector_jobs
+            WHERE user_id = ? AND operation = ?
+            ORDER BY id DESC
+            LIMIT 1
+            """,
+            (user_id, operation),
+        ).fetchone()
+        return _decode_connector_job(dict(row)) if row else None
+
+
+def list_connector_jobs_for_commit_run(commit_run_id: int) -> list[dict[str, Any]]:
+    with get_connection() as connection:
+        return [
+            _decode_connector_job(dict(row))
+            for row in connection.execute(
+                """
+                SELECT * FROM connector_jobs
+                WHERE commit_run_id = ?
+                ORDER BY id
+                """,
+                (commit_run_id,),
+            )
+        ]
+
+
+def list_recent_connector_jobs_for_agent(agent_id: int, limit: int = 10) -> list[dict[str, Any]]:
+    with get_connection() as connection:
+        return [
+            _decode_connector_job(dict(row))
+            for row in connection.execute(
+                """
+                SELECT * FROM connector_jobs
+                WHERE agent_id = ?
+                ORDER BY id DESC
+                LIMIT ?
+                """,
+                (agent_id, limit),
+            )
+        ]
+
+
+def _decode_connector_job(job: dict[str, Any]) -> dict[str, Any]:
+    for source, target in (("payload_json", "payload"), ("result_json", "result")):
+        raw = job.get(source)
+        if raw:
+            try:
+                job[target] = json.loads(raw)
+            except (TypeError, ValueError):
+                job[target] = {}
+        else:
+            job[target] = {}
+    return job
 
 
 def replace_stock_items(items: Iterable[str | dict[str, Any]], company_id: int | None = None) -> None:
@@ -1044,6 +1322,175 @@ def mark_import_completed(import_id: int) -> None:
             "UPDATE imports SET status = 'committed', completed_at = ? WHERE id = ?",
             (utc_now(), import_id),
         )
+
+
+def create_commit_run(user_id: int, company_id: int, import_id: int, total_count: int = 0) -> dict[str, Any]:
+    now = utc_now()
+    with get_connection() as connection:
+        cursor = connection.execute(
+            """
+            INSERT INTO commit_runs (user_id, company_id, import_id, status, total_count, created_at, updated_at)
+            VALUES (?, ?, ?, 'queued', ?, ?, ?)
+            """,
+            (user_id, company_id, import_id, total_count, now, now),
+        )
+        return get_commit_run(cursor.lastrowid, user_id=user_id, company_id=company_id, connection=connection)
+
+
+def get_commit_run(run_id: int, user_id: int, company_id: int, connection: sqlite3.Connection | None = None) -> dict[str, Any] | None:
+    close = connection is None
+    connection = connection or get_connection()
+    try:
+        row = connection.execute(
+            "SELECT * FROM commit_runs WHERE id = ? AND user_id = ? AND company_id = ?",
+            (run_id, user_id, company_id),
+        ).fetchone()
+        return _decode_commit_run(dict(row)) if row else None
+    finally:
+        if close:
+            connection.close()
+
+
+def get_active_commit_run(user_id: int, company_id: int, import_id: int) -> dict[str, Any] | None:
+    with get_connection() as connection:
+        row = connection.execute(
+            """
+            SELECT * FROM commit_runs
+            WHERE user_id = ? AND company_id = ? AND import_id = ?
+              AND status IN ('queued', 'processing')
+            ORDER BY id DESC
+            LIMIT 1
+            """,
+            (user_id, company_id, import_id),
+        ).fetchone()
+        return _decode_commit_run(dict(row)) if row else None
+
+
+def update_commit_run_status(run_id: int, status: str, total_count: int | None = None) -> None:
+    updates: dict[str, Any] = {"status": status, "updated_at": utc_now()}
+    if total_count is not None:
+        updates["total_count"] = total_count
+    assignments = ", ".join(f"{key} = ?" for key in updates)
+    with get_connection() as connection:
+        connection.execute(f"UPDATE commit_runs SET {assignments} WHERE id = ?", (*updates.values(), run_id))
+
+
+def complete_commit_run(run_id: int, summary: dict[str, Any]) -> dict[str, Any] | None:
+    now = utc_now()
+    with get_connection() as connection:
+        connection.execute(
+            """
+            UPDATE commit_runs
+            SET status = 'completed',
+                total_count = ?,
+                success_count = ?,
+                failed_count = ?,
+                result_json = ?,
+                error_message = NULL,
+                completed_at = ?,
+                updated_at = ?
+            WHERE id = ?
+            """,
+            (
+                len(summary.get("results") or []),
+                summary.get("success_count", 0),
+                summary.get("failed_count", 0),
+                json.dumps(summary),
+                now,
+                now,
+                run_id,
+            ),
+        )
+        row = connection.execute("SELECT * FROM commit_runs WHERE id = ?", (run_id,)).fetchone()
+        return _decode_commit_run(dict(row)) if row else None
+
+
+def refresh_commit_run_from_rows(run_id: int) -> dict[str, Any] | None:
+    with get_connection() as connection:
+        run_row = connection.execute("SELECT * FROM commit_runs WHERE id = ?", (run_id,)).fetchone()
+        if not run_row:
+            return None
+        run = dict(run_row)
+        counts = connection.execute(
+            """
+            SELECT
+                COUNT(*) AS total_count,
+                SUM(CASE WHEN commit_status = 'success' THEN 1 ELSE 0 END) AS success_count,
+                SUM(CASE WHEN commit_status = 'failed' THEN 1 ELSE 0 END) AS failed_count
+            FROM import_rows
+            WHERE import_id = ?
+              AND validation_status = 'valid'
+            """,
+            (run["import_id"],),
+        ).fetchone()
+        total = counts["total_count"] or 0
+        success = counts["success_count"] or 0
+        failed = counts["failed_count"] or 0
+        jobs = list_connector_jobs_for_commit_run(run_id)
+        job_terminal = jobs and all(job["status"] in {"completed", "failed"} for job in jobs)
+        status = "completed" if job_terminal and success + failed >= total else "processing"
+        completed_at = utc_now() if status == "completed" else None
+        result = {
+            "results": [
+                {"job_id": job["id"], "status": "success" if job["status"] == "completed" else "failed", "error": job.get("error_message")}
+                for job in jobs
+                if job["status"] in {"completed", "failed"}
+            ],
+            "rows": list_import_rows(run["import_id"], run["company_id"]),
+            "success_count": success,
+            "failed_count": failed,
+        }
+        connection.execute(
+            """
+            UPDATE commit_runs
+            SET status = ?,
+                total_count = ?,
+                success_count = ?,
+                failed_count = ?,
+                result_json = ?,
+                completed_at = COALESCE(completed_at, ?),
+                updated_at = ?
+            WHERE id = ?
+            """,
+            (status, total, success, failed, json.dumps(result), completed_at, utc_now(), run_id),
+        )
+        if status == "completed":
+            connection.execute(
+                "UPDATE imports SET status = 'committed', completed_at = COALESCE(completed_at, ?) WHERE id = ?",
+                (completed_at, run["import_id"]),
+            )
+        row = connection.execute("SELECT * FROM commit_runs WHERE id = ?", (run_id,)).fetchone()
+        return _decode_commit_run(dict(row)) if row else None
+
+
+def fail_commit_run(run_id: int, error_message: str) -> dict[str, Any] | None:
+    now = utc_now()
+    with get_connection() as connection:
+        connection.execute(
+            """
+            UPDATE commit_runs
+            SET status = 'failed',
+                error_message = ?,
+                completed_at = ?,
+                updated_at = ?
+            WHERE id = ?
+            """,
+            (error_message, now, now, run_id),
+        )
+        row = connection.execute("SELECT * FROM commit_runs WHERE id = ?", (run_id,)).fetchone()
+        return _decode_commit_run(dict(row)) if row else None
+
+
+def _decode_commit_run(run: dict[str, Any]) -> dict[str, Any]:
+    raw = run.get("result_json")
+    if raw:
+        try:
+            run["result"] = json.loads(raw)
+        except (TypeError, ValueError):
+            run["result"] = {}
+    else:
+        run["result"] = {}
+    return run
 
 
 def _decode_import_row(row: sqlite3.Row) -> dict[str, Any]:

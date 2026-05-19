@@ -4,11 +4,14 @@ import { useEffect, useMemo, useRef, useState } from "react";
 
 import { AppShell, CommitResultView, DashboardView, HistoryDetailView, HistoryView, InventoryView, LoginPanel, PreviewCommitView, SetupView, UploadView } from "./components";
 import { formatUserError, tallyIsConnected } from "./lib/derivations";
-import type { AppView, CommitSummary, Company, ImportPreview, ImportRecord, ImportRow, ImportType, StockItemsResponse, TallyCompanies, TallyStatus, User } from "./lib/types";
+import type { AppView, CommitRun, CommitSummary, Company, HelperStatus, ImportPreview, ImportRecord, ImportRow, ImportType, StockItemsResponse, TallyCompanies, TallyStatus, User } from "./lib/types";
 
-const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
+const CONFIGURED_API_URL = process.env.NEXT_PUBLIC_API_URL || "";
 const GOOGLE_CLIENT_ID = process.env.NEXT_PUBLIC_GOOGLE_CLIENT_ID || "";
 const ENABLE_DEV_LOGIN = process.env.NEXT_PUBLIC_ENABLE_DEV_LOGIN === "true";
+const HELPER_DOWNLOAD_URL = process.env.NEXT_PUBLIC_HELPER_DOWNLOAD_URL || "";
+const CONNECTOR_MODE = (process.env.NEXT_PUBLIC_CONNECTOR_MODE || (process.env.NODE_ENV === "production" ? "polling" : "direct")).toLowerCase();
+const HELPER_SETUP_ENABLED = CONNECTOR_MODE === "polling";
 
 declare global {
   interface Window {
@@ -29,6 +32,7 @@ export default function Home() {
   const [companies, setCompanies] = useState<Company[]>([]);
   const [activeCompanyId, setActiveCompanyId] = useState<number | null>(null);
   const [tallyStatus, setTallyStatus] = useState<TallyStatus | null>(null);
+  const [helperStatus, setHelperStatus] = useState<HelperStatus | null>(null);
   const [tallyCompanies, setTallyCompanies] = useState<TallyCompanies>({ available: false, companies: [] });
   const [imports, setImports] = useState<ImportRecord[]>([]);
   const [importDetails, setImportDetails] = useState<Record<number, ImportRow[]>>({});
@@ -42,6 +46,7 @@ export default function Home() {
   const [devEmail, setDevEmail] = useState("");
   const [preview, setPreview] = useState<ImportPreview | null>(null);
   const [commitSummary, setCommitSummary] = useState<CommitSummary | null>(null);
+  const [commitRun, setCommitRun] = useState<CommitRun | null>(null);
   const [historyDetail, setHistoryDetail] = useState<ImportPreview | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
@@ -87,11 +92,23 @@ export default function Home() {
       setStockItems(null);
       return;
     }
-    void Promise.all([loadImports(activeCompany.id), loadStockItems(activeCompany.id)]);
+    void Promise.all([
+      loadImports(activeCompany.id),
+      loadStockItems(activeCompany.id),
+      HELPER_SETUP_ENABLED ? loadConnectorStatus(activeCompany.id) : loadTallyStatus(),
+    ]);
   }, [activeCompany?.id]);
 
+  useEffect(() => {
+    if (!HELPER_SETUP_ENABLED || !user || helperStatus?.status === "connected") return;
+    const interval = window.setInterval(() => {
+      void loadHelperStatus();
+    }, 5000);
+    return () => window.clearInterval(interval);
+  }, [user, helperStatus?.status]);
+
   async function api(path: string, init: RequestInit = {}) {
-    const response = await fetch(`${API_URL}${path}`, {
+    const response = await fetch(`${apiUrl()}${path}`, {
       credentials: "include",
       headers: { "Content-Type": "application/json", ...(init.headers || {}) },
       ...init,
@@ -100,7 +117,7 @@ export default function Home() {
   }
 
   async function uploadApi(path: string, formData: FormData) {
-    const response = await fetch(`${API_URL}${path}`, {
+    const response = await fetch(`${apiUrl()}${path}`, {
       method: "POST",
       credentials: "include",
       body: formData,
@@ -126,7 +143,7 @@ export default function Home() {
     try {
       const data = await api("/auth/me");
       setUser(data.user);
-      await Promise.all([loadCompanies(), loadTallyStatus(), loadTallyCompanies()]);
+      await Promise.all([loadCompanies(), HELPER_SETUP_ENABLED ? loadHelperStatus() : Promise.resolve(), loadTallyStatus(), loadTallyCompanies()]);
     } catch {
       setUser(null);
     }
@@ -138,7 +155,7 @@ export default function Home() {
     try {
       const data = await api("/auth/google", { method: "POST", body: JSON.stringify({ id_token: idToken }) });
       setUser(data.user);
-      await Promise.all([loadCompanies(), loadTallyStatus(), loadTallyCompanies()]);
+      await Promise.all([loadCompanies(), HELPER_SETUP_ENABLED ? loadHelperStatus() : Promise.resolve(), loadTallyStatus(), loadTallyCompanies()]);
     } catch (loginError) {
       setError(loginError instanceof Error ? loginError.message : "Sign-in failed");
     } finally {
@@ -165,8 +182,10 @@ export default function Home() {
       setStockItems(null);
       setPreview(null);
       setCommitSummary(null);
+      setCommitRun(null);
       setHistoryDetail(null);
       setTallyStatus(null);
+      setHelperStatus(null);
       setBusy(false);
       setActiveView("dashboard");
     }
@@ -189,9 +208,59 @@ export default function Home() {
 
   async function loadTallyCompanies() {
     try {
+      if (HELPER_SETUP_ENABLED && helperStatus?.status === "connected") {
+        const connectorCompanies = await api("/connector/tally-companies");
+        if (connectorCompanies.status === "not_requested") {
+          const queued = await api("/connector/tally-companies/check", { method: "POST", body: JSON.stringify({}) });
+          setTallyCompanies(queued.companies);
+          return;
+        }
+        setTallyCompanies(connectorCompanies);
+        return;
+      }
       setTallyCompanies(await api("/tally/companies"));
     } catch {
       setTallyCompanies({ available: false, companies: [], message: "Company list is unavailable. You can type the Tally company name." });
+    }
+  }
+
+  async function loadHelperStatus() {
+    if (!HELPER_SETUP_ENABLED) {
+      setHelperStatus(null);
+      return;
+    }
+    try {
+      setHelperStatus(await api("/connector/status"));
+    } catch {
+      setHelperStatus({ status: "helper_required", message: "Install AccountPilot Helper to connect with Tally.", agent: null });
+    }
+  }
+
+  async function startHelperSetup() {
+    if (busy) return;
+    setBusy(true);
+    setError("");
+    try {
+      const setup = await api("/connector/setup-session", { method: "POST", body: JSON.stringify({}) });
+      await loadHelperStatus();
+      if (HELPER_DOWNLOAD_URL) {
+        const url = new URL(HELPER_DOWNLOAD_URL, window.location.href);
+        url.searchParams.set("setup_token", setup.setup_token);
+        window.open(url.toString(), "_blank", "noopener,noreferrer");
+      }
+    } catch (setupError) {
+      setError(setupError instanceof Error ? setupError.message : "Unable to start AccountPilot Helper setup");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function loadConnectorStatus(companyId: number) {
+    try {
+      const data = await api(`/companies/${companyId}/connector/status`);
+      if (data?.status) setTallyStatus(data);
+    } catch {
+      // Keep the current direct-mode status if the tracer endpoint is unavailable.
     }
   }
 
@@ -228,7 +297,18 @@ export default function Home() {
     setBusy(true);
     setError("");
     try {
-      await Promise.all([loadTallyStatus(), loadTallyCompanies()]);
+      if (HELPER_SETUP_ENABLED) await loadHelperStatus();
+      if (HELPER_SETUP_ENABLED && activeCompany?.id) {
+        try {
+          await api(`/companies/${activeCompany.id}/connector/health-check`, { method: "POST", body: JSON.stringify({}) });
+          await loadConnectorStatus(activeCompany.id);
+        } catch (statusError) {
+          setTallyStatus({ status: "disconnected", message: statusError instanceof Error ? statusError.message : "Can't connect to Tally right now.", detail: "connector_unavailable" });
+        }
+      } else {
+        await loadTallyStatus();
+      }
+      await loadTallyCompanies();
     } finally {
       setBusy(false);
     }
@@ -329,17 +409,34 @@ export default function Home() {
     setBusy(true);
     setError("");
     try {
-      const data = await api(`/companies/${activeCompany.id}/imports/${preview.import.id}/commit`, { method: "POST", body: JSON.stringify({}) });
-      setCommitSummary(data);
-      setPreview({ import: preview.import, rows: data.rows });
-      setImportDetails((current) => ({ ...current, [preview.import.id]: data.rows }));
+      const started = await api(`/companies/${activeCompany.id}/imports/${preview.import.id}/commit-runs`, { method: "POST", body: JSON.stringify({}) });
+      const completed = await waitForCommitRun(activeCompany.id, preview.import.id, started.commit_run);
+      const summary = completed.result as CommitSummary | undefined;
+      if (completed.status === "failed" || !summary?.rows) throw new Error(completed.error_message || "Commit failed");
+      setCommitSummary(summary);
+      setPreview({ import: preview.import, rows: summary.rows });
+      setImportDetails((current) => ({ ...current, [preview.import.id]: summary.rows }));
       await loadImports(activeCompany.id);
       setActiveView("result");
     } catch (commitError) {
       setError(commitError instanceof Error ? commitError.message : "Commit failed");
     } finally {
       setBusy(false);
+      setCommitRun(null);
     }
+  }
+
+  async function waitForCommitRun(companyId: number, importId: number, initialRun: CommitRun): Promise<CommitRun> {
+    let current = initialRun;
+    setCommitRun(current);
+    for (let attempt = 0; attempt < 120; attempt += 1) {
+      if (current.status === "completed" || current.status === "failed") return current;
+      await new Promise((resolve) => window.setTimeout(resolve, 1000));
+      const data = await api(`/companies/${companyId}/imports/${importId}/commit-runs/${current.id}`);
+      current = data.commit_run;
+      setCommitRun(current);
+    }
+    throw new Error("Commit is still processing. Check history in a few minutes.");
   }
 
   async function openImportLog(importRecord: ImportRecord) {
@@ -389,7 +486,12 @@ export default function Home() {
           setSupplierState={setSupplierState}
           tallyCompanies={tallyCompanies}
           tallyStatus={tallyStatus}
+          helperStatus={helperStatus}
           addCompany={addCompany}
+          startHelperSetup={startHelperSetup}
+          showHelperSetup={HELPER_SETUP_ENABLED}
+          helperDownloadConfigured={Boolean(HELPER_DOWNLOAD_URL)}
+          refreshConnection={refreshConnection}
           busy={busy}
           existingCompanies={companies}
           error={error}
@@ -438,7 +540,7 @@ export default function Home() {
       )}
       {activeView === "preview" &&
         (preview ? (
-          <PreviewCommitView preview={preview} tallyStatus={tallyStatus} busy={busy} commitRows={commitRows} setActiveView={setActiveView} error={error} />
+          <PreviewCommitView preview={preview} tallyStatus={tallyStatus} commitRun={commitRun} busy={busy} commitRows={commitRows} setActiveView={setActiveView} error={error} />
         ) : (
           <UploadView
             selectedFile={selectedFile}
@@ -466,4 +568,10 @@ export default function Home() {
         ))}
     </AppShell>
   );
+}
+
+function apiUrl() {
+  if (CONFIGURED_API_URL) return CONFIGURED_API_URL;
+  if (typeof window === "undefined") return "http://localhost:8000";
+  return `${window.location.protocol}//${window.location.hostname}:8000`;
 }

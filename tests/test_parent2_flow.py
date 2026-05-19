@@ -47,6 +47,10 @@ class Parent2FlowTests(unittest.TestCase):
         database.create_pairing_token(self.user["id"], "Office PC", "hash", base_url="http://localhost:9100")
         return database.pair_local_agent("hash", base_url="http://localhost:9100")
 
+    def make_token_agent(self, token: str = "agent-secret") -> dict:
+        database.create_pairing_token(self.user["id"], "Office PC", "hash-token", base_url="http://localhost:9100", auth_token=token)
+        return database.pair_local_agent("hash-token", base_url="http://localhost:9100")
+
     def company_request(self, company_name: str = "Bhrama Enterprises") -> routes.CompanyRequest:
         return routes.CompanyRequest(
             company_name=company_name,
@@ -295,13 +299,34 @@ class Parent2FlowTests(unittest.TestCase):
         self.assertIn("Can't connect to Tally", unreachable.exception.detail)
 
     def test_tally_status_and_company_discovery_are_backend_owned(self) -> None:
-        self.make_agent()
-        with patch("backend.services.local_agent_service.dispatch_tally_operation", side_effect=self.fake_master_dispatch):
+        with patch("backend.services.tally_status_service.TallyClient") as tally_client:
+            tally_client.return_value.ping.return_value = True
+            tally_client.return_value.get_companies.return_value = ["Bhrama Enterprises", "Company B"]
             status = routes.tally_status(user=self.user)
             companies = routes.tally_companies(user=self.user)
 
         self.assertEqual(status["status"], "connected")
         self.assertEqual(companies["companies"], ["Bhrama Enterprises", "Company B"])
+
+    def test_polling_mode_status_uses_helper_without_direct_dispatch(self) -> None:
+        original_mode = config.CONNECTOR_MODE
+        config.CONNECTOR_MODE = "polling"
+        self.addCleanup(lambda: setattr(config, "CONNECTOR_MODE", original_mode))
+        setup = routes.connector_setup_session(user=self.user)
+        registered = routes.connector_register(routes.ConnectorRegisterRequest(setup_token=setup["setup_token"]))
+
+        with patch("backend.services.local_agent_service.dispatch_tally_operation") as dispatch:
+            status = routes.tally_status(user=self.user)
+            companies = routes.tally_companies(user=self.user)
+
+        dispatch.assert_not_called()
+        self.assertEqual(status["status"], "connected")
+        self.assertFalse(companies["available"])
+        polled = routes.connector_poll(
+            routes.ConnectorPollRequest(agent_id=registered["agent"]["id"]),
+            x_accountpilot_agent_token=registered["agent_auth_token"],
+        )
+        self.assertEqual(polled["job"]["operation"], "list_companies")
 
     def test_local_agent_pairing_heartbeat_and_revocation(self) -> None:
         company = self.make_company()
@@ -322,6 +347,243 @@ class Parent2FlowTests(unittest.TestCase):
 
         self.assertEqual(heartbeat["pairing_status"], "paired")
         self.assertTrue(routes.revoke_agent(company["id"], paired["id"], user=self.user))
+
+    def test_connector_health_job_leases_and_updates_visible_status(self) -> None:
+        company = self.make_company()
+        agent = self.make_token_agent()
+        database.update_company(company["id"], self.user["id"], {"local_agent_id": agent["id"]})
+
+        created = routes.create_connector_health_check(company["id"], user=self.user)
+        self.assertEqual(created["job"]["operation"], "health_check")
+        self.assertEqual(created["status"]["status"], "checking")
+
+        polled = routes.connector_poll(
+            routes.ConnectorPollRequest(agent_id=agent["id"]),
+            x_accountpilot_agent_token="agent-secret",
+        )
+        self.assertIsNotNone(polled["job"])
+        self.assertEqual(polled["job"]["id"], created["job"]["id"])
+        self.assertEqual(polled["job"]["status"], "leased")
+        self.assertEqual(polled["job"]["payload"]["company_name"], company["company_name"])
+
+        checking = routes.connector_status(company["id"], user=self.user)
+        self.assertEqual(checking["status"], "checking")
+
+        completed = routes.connector_job_result(
+            polled["job"]["id"],
+            routes.ConnectorJobResultRequest(agent_id=agent["id"], status="success", result={"status": "connected"}),
+            x_accountpilot_agent_token="agent-secret",
+        )
+        self.assertEqual(completed["job"]["status"], "completed")
+        status = routes.connector_status(company["id"], user=self.user)
+        self.assertEqual(status["status"], "connected")
+        self.assertEqual(status["message"], "Connected to Tally")
+
+    def test_connector_health_job_requires_matching_connector_token(self) -> None:
+        company = self.make_company()
+        agent = self.make_token_agent()
+        database.update_company(company["id"], self.user["id"], {"local_agent_id": agent["id"]})
+        routes.create_connector_health_check(company["id"], user=self.user)
+
+        with self.assertRaises(HTTPException) as raised:
+            routes.connector_poll(
+                routes.ConnectorPollRequest(agent_id=agent["id"]),
+                x_accountpilot_agent_token="wrong-secret",
+            )
+        self.assertEqual(raised.exception.status_code, 401)
+
+    def test_connector_setup_session_registers_helper_and_reports_detection_state(self) -> None:
+        initial = routes.helper_detection_status(user=self.user)
+        self.assertEqual(initial["status"], "helper_required")
+
+        setup = routes.connector_setup_session(user=self.user)
+        self.assertIn("setup_token", setup)
+        self.assertNotIn("auth_token", setup["agent"])
+        waiting = routes.helper_detection_status(user=self.user)
+        self.assertEqual(waiting["status"], "waiting_for_helper")
+
+        registered = routes.connector_register(
+            routes.ConnectorRegisterRequest(setup_token=setup["setup_token"], device_name="Accounts PC")
+        )
+        self.assertIn("agent_auth_token", registered)
+        self.assertNotIn("auth_token", registered["agent"])
+        self.assertEqual(registered["agent"]["device_name"], "Accounts PC")
+
+        connected = routes.helper_detection_status(user=self.user)
+        self.assertEqual(connected["status"], "connected")
+        self.assertEqual(routes.helper_detection_status(user=self.other_user)["status"], "helper_required")
+
+        polled = routes.connector_poll(
+            routes.ConnectorPollRequest(agent_id=registered["agent"]["id"]),
+            x_accountpilot_agent_token=registered["agent_auth_token"],
+        )
+        self.assertIsNone(polled["job"])
+
+    def test_connector_register_rejects_expired_setup_session(self) -> None:
+        token = "expired-token"
+        database.create_pairing_token(
+            self.user["id"],
+            "AccountPilot Helper",
+            auth_service.hash_token(token),
+            auth_token="agent-secret",
+            setup_expires_at="2000-01-01T00:00:00+00:00",
+        )
+
+        with self.assertRaises(HTTPException) as raised:
+            routes.connector_register(routes.ConnectorRegisterRequest(setup_token=token))
+        self.assertEqual(raised.exception.status_code, 404)
+
+    def test_tally_company_discovery_uses_connector_jobs(self) -> None:
+        setup = routes.connector_setup_session(user=self.user)
+        registered = routes.connector_register(routes.ConnectorRegisterRequest(setup_token=setup["setup_token"]))
+        agent = registered["agent"]
+
+        created = routes.create_tally_companies_check(user=self.user)
+        self.assertEqual(created["job"]["operation"], "list_companies")
+        self.assertEqual(created["companies"]["status"], "checking")
+
+        polled = routes.connector_poll(
+            routes.ConnectorPollRequest(agent_id=agent["id"]),
+            x_accountpilot_agent_token=registered["agent_auth_token"],
+        )
+        self.assertEqual(polled["job"]["operation"], "list_companies")
+        routes.connector_job_result(
+            polled["job"]["id"],
+            routes.ConnectorJobResultRequest(
+                agent_id=agent["id"],
+                status="success",
+                result={"companies": ["Bhrama Enterprises", "Company B", "Bhrama Enterprises"]},
+            ),
+            x_accountpilot_agent_token=registered["agent_auth_token"],
+        )
+
+        companies = routes.connector_tally_companies(user=self.user)
+        self.assertTrue(companies["available"])
+        self.assertEqual(companies["companies"], ["Bhrama Enterprises", "Company B"])
+
+    def test_company_validation_uses_connector_jobs(self) -> None:
+        setup = routes.connector_setup_session(user=self.user)
+        registered = routes.connector_register(routes.ConnectorRegisterRequest(setup_token=setup["setup_token"]))
+        agent = registered["agent"]
+
+        created = routes.create_connector_company_validation(
+            routes.ConnectorValidateCompanyRequest(company_name="Bhrama Enterprises"),
+            user=self.user,
+        )
+        self.assertEqual(created["validation"]["status"], "checking")
+        polled = routes.connector_poll(
+            routes.ConnectorPollRequest(agent_id=agent["id"]),
+            x_accountpilot_agent_token=registered["agent_auth_token"],
+        )
+        self.assertEqual(polled["job"]["operation"], "validate_company")
+        self.assertEqual(polled["job"]["payload"]["company_name"], "Bhrama Enterprises")
+
+        routes.connector_job_result(
+            polled["job"]["id"],
+            routes.ConnectorJobResultRequest(
+                agent_id=agent["id"],
+                status="success",
+                result={"ledgers": [{"name": "Sales", "group": "Sales Accounts"}]},
+            ),
+            x_accountpilot_agent_token=registered["agent_auth_token"],
+        )
+        validation = routes.connector_company_validation(polled["job"]["id"], user=self.user)
+        self.assertTrue(validation["valid"])
+        self.assertEqual(validation["status"], "valid")
+
+    def test_master_sync_jobs_update_company_scoped_cache(self) -> None:
+        company = self.make_company()
+        agent = self.make_token_agent()
+        database.update_company(company["id"], self.user["id"], {"local_agent_id": agent["id"]})
+
+        created = routes.create_connector_master_sync(company["id"], user=self.user)
+        self.assertEqual([job["operation"] for job in created["jobs"]], ["sync_ledgers", "sync_stock_items"])
+        self.assertEqual(created["status"]["status"], "syncing")
+
+        ledgers_job = routes.connector_poll(
+            routes.ConnectorPollRequest(agent_id=agent["id"]),
+            x_accountpilot_agent_token="agent-secret",
+        )["job"]
+        routes.connector_job_result(
+            ledgers_job["id"],
+            routes.ConnectorJobResultRequest(
+                agent_id=agent["id"],
+                status="success",
+                result={"ledgers": [{"name": "Sales", "group": "Sales Accounts"}, {"name": "Cash", "group": "Cash-in-Hand"}]},
+            ),
+            x_accountpilot_agent_token="agent-secret",
+        )
+        self.assertEqual(len(database.list_ledgers(company["id"])), 2)
+        self.assertEqual(routes.connector_master_sync_status(company["id"], user=self.user)["status"], "syncing")
+
+        stock_job = routes.connector_poll(
+            routes.ConnectorPollRequest(agent_id=agent["id"]),
+            x_accountpilot_agent_token="agent-secret",
+        )["job"]
+        routes.connector_job_result(
+            stock_job["id"],
+            routes.ConnectorJobResultRequest(
+                agent_id=agent["id"],
+                status="success",
+                result={"stock_items": [{"name": "2.75-18 NGP", "group_name": "Tyres"}]},
+            ),
+            x_accountpilot_agent_token="agent-secret",
+        )
+
+        status = routes.connector_master_sync_status(company["id"], user=self.user)
+        company = database.get_company(company["id"], user_id=self.user["id"])
+        self.assertEqual(status["status"], "completed")
+        self.assertEqual(company["last_sync_status"], "success")
+        self.assertIsNotNone(company["last_sync_at"])
+        self.assertEqual(len(database.list_stock_items(company["id"])), 1)
+
+    def test_failed_connector_health_job_updates_visible_status(self) -> None:
+        company = self.make_company()
+        agent = self.make_token_agent()
+        database.update_company(company["id"], self.user["id"], {"local_agent_id": agent["id"]})
+        created = routes.create_connector_health_check(company["id"], user=self.user)
+        routes.connector_poll(routes.ConnectorPollRequest(agent_id=agent["id"]), x_accountpilot_agent_token="agent-secret")
+
+        routes.connector_job_result(
+            created["job"]["id"],
+            routes.ConnectorJobResultRequest(
+                agent_id=agent["id"],
+                status="failed",
+                result={"detail": "connection refused"},
+                error_message="connection refused",
+            ),
+            x_accountpilot_agent_token="agent-secret",
+        )
+
+        status = routes.connector_status(company["id"], user=self.user)
+        self.assertEqual(status["status"], "disconnected")
+        self.assertEqual(status["detail"], "tally_unreachable")
+        self.assertIn("Open Tally", status["message"])
+
+    def test_helper_diagnostics_include_last_activity_and_recent_failures(self) -> None:
+        company = self.make_company()
+        agent = self.make_token_agent()
+        database.update_company(company["id"], self.user["id"], {"local_agent_id": agent["id"]})
+        created = routes.create_connector_health_check(company["id"], user=self.user)
+        routes.connector_poll(routes.ConnectorPollRequest(agent_id=agent["id"]), x_accountpilot_agent_token="agent-secret")
+        routes.connector_job_result(
+            created["job"]["id"],
+            routes.ConnectorJobResultRequest(
+                agent_id=agent["id"],
+                status="failed",
+                result={"detail": "Tally closed"},
+                error_message="Tally closed",
+            ),
+            x_accountpilot_agent_token="agent-secret",
+        )
+
+        diagnostics = routes.helper_diagnostics(user=self.user)
+        self.assertEqual(diagnostics["agent"]["id"], agent["id"])
+        self.assertIsNotNone(diagnostics["last_heartbeat_at"])
+        self.assertIsNotNone(diagnostics["last_activity_at"])
+        self.assertEqual(diagnostics["last_error"], "Tally closed")
+        self.assertEqual(diagnostics["recent_jobs"][0]["status"], "failed")
+        self.assertEqual(diagnostics["recent_jobs"][0]["operation"], "health_check")
 
     def test_company_sync_uses_local_agent_and_company_scope(self) -> None:
         company = self.make_company()
@@ -609,6 +871,63 @@ class Parent2FlowTests(unittest.TestCase):
         self.assertEqual(logs[0]["user_id"], self.user["id"])
         self.assertEqual(logs[0]["company_id"], company["id"])
         self.assertEqual(logs[0]["import_id"], import_record["id"])
+
+    def test_commit_run_wraps_commit_summary_with_progress_record(self) -> None:
+        company = self.make_company()
+        agent = self.make_agent()
+        database.update_company(company["id"], self.user["id"], {"local_agent_id": agent["id"]})
+        self.seed_company_masters(company)
+        import_record = self.upload_rows(company)
+        routes.process_import(company["id"], import_record["id"], user=self.user)
+
+        with patch("backend.services.local_agent_service.dispatch_tally_operation", side_effect=self.fake_master_dispatch):
+            started = routes.start_commit_run(company["id"], import_record["id"], routes.CommitRequest(), background_tasks=None, user=self.user)
+
+        run = started["commit_run"]
+        self.assertEqual(run["status"], "completed")
+        self.assertEqual(run["success_count"], 1)
+        self.assertEqual(run["failed_count"], 0)
+        self.assertIn("rows", run["result"])
+
+        fetched = routes.get_commit_run(company["id"], import_record["id"], run["id"], user=self.user)["commit_run"]
+        self.assertEqual(fetched["status"], "completed")
+        self.assertEqual(fetched["result"]["success_count"], 1)
+
+    def test_polling_commit_run_creates_voucher_jobs_and_updates_summary_from_results(self) -> None:
+        original_mode = config.CONNECTOR_MODE
+        config.CONNECTOR_MODE = "polling"
+        self.addCleanup(lambda: setattr(config, "CONNECTOR_MODE", original_mode))
+        company = self.make_company()
+        agent = self.make_token_agent()
+        database.update_company(company["id"], self.user["id"], {"local_agent_id": agent["id"]})
+        self.seed_company_masters(company)
+        import_record = self.upload_rows(company)
+        routes.process_import(company["id"], import_record["id"], user=self.user)
+
+        started = routes.start_commit_run(company["id"], import_record["id"], routes.CommitRequest(), background_tasks=None, user=self.user)
+        run = started["commit_run"]
+        self.assertEqual(run["status"], "processing")
+
+        polled = routes.connector_poll(
+            routes.ConnectorPollRequest(agent_id=agent["id"]),
+            x_accountpilot_agent_token="agent-secret",
+        )
+        self.assertEqual(polled["job"]["operation"], "create_sales_voucher")
+        self.assertEqual(polled["job"]["commit_run_id"], run["id"])
+        self.assertIn("idempotency_key", polled["job"]["payload"])
+
+        routes.connector_job_result(
+            polled["job"]["id"],
+            routes.ConnectorJobResultRequest(agent_id=agent["id"], status="success", result={"STATUS": "1"}),
+            x_accountpilot_agent_token="agent-secret",
+        )
+
+        completed = routes.get_commit_run(company["id"], import_record["id"], run["id"], user=self.user)["commit_run"]
+        row = database.list_import_rows(import_record["id"], company["id"])[0]
+        self.assertEqual(completed["status"], "completed")
+        self.assertEqual(completed["success_count"], 1)
+        self.assertEqual(row["commit_status"], "success")
+        self.assertEqual(len(database.list_voucher_logs(company["id"])), 1)
 
     def test_duplicate_looking_rows_are_allowed_in_import_path(self) -> None:
         company = self.make_company()

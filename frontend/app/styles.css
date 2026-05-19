@@ -443,6 +443,40 @@ h3 {
   align-items: center;
 }
 
+.helper-panel {
+  display: flex;
+  gap: 18px;
+  align-items: flex-start;
+  padding: 16px;
+  border: 1px solid var(--border-soft);
+  border-radius: 8px;
+  background: var(--surface-muted);
+}
+
+.helper-panel.connected {
+  background: var(--success-bg);
+}
+
+.helper-panel .status-icon {
+  width: 48px;
+  height: 48px;
+  flex: 0 0 48px;
+}
+
+.helper-panel h3 {
+  margin-bottom: 4px;
+}
+
+.helper-panel p {
+  margin-bottom: 10px;
+}
+
+.helper-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
 .status-line {
   display: flex;
   gap: 12px;
