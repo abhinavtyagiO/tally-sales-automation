@@ -1,23 +1,24 @@
 from __future__ import annotations
 
 import logging
+import sys
 import threading
 import time
 import tkinter as tk
 from tkinter import ttk
 
-from connector.main import PollingConnector, settings_from_env
+from connector.main import PollingConnector, build_parser, configure_from_setup_args, configure_logging, settings_from_env
 
 
 class HelperApp:
-    def __init__(self) -> None:
+    def __init__(self, startup_error: str = "") -> None:
         self.root = tk.Tk()
         self.root.title("AccountPilot Helper")
         self.root.geometry("380x180")
         self.root.resizable(False, False)
         self.status_var = tk.StringVar(value="Starting AccountPilot Helper...")
         self.last_activity_var = tk.StringVar(value="Last activity: Not yet")
-        self.error_var = tk.StringVar(value="")
+        self.error_var = tk.StringVar(value=startup_error)
 
         frame = ttk.Frame(self.root, padding=20)
         frame.pack(fill="both", expand=True)
@@ -26,16 +27,27 @@ class HelperApp:
         ttk.Label(frame, textvariable=self.last_activity_var).pack(anchor="w")
         ttk.Label(frame, textvariable=self.error_var, foreground="#991b1b", wraplength=330).pack(anchor="w", pady=(10, 0))
 
-        self.connector = PollingConnector(settings_from_env())
+        self.connector = None
+        if not startup_error:
+            try:
+                self.connector = PollingConnector(settings_from_env())
+            except Exception as exc:
+                startup_error = f"Setup is incomplete: {exc}"
+                self.error_var.set(startup_error)
         self.thread = threading.Thread(target=self._run_loop, daemon=True)
 
     def run(self) -> None:
-        self.thread.start()
+        if self.connector:
+            self.thread.start()
+        else:
+            self.status_var.set("Connection needs attention")
         self.root.mainloop()
 
     def _run_loop(self) -> None:
         while True:
             try:
+                if not self.connector:
+                    return
                 ran_job = self.connector.run_once()
                 if ran_job:
                     self._set_status("AccountPilot connected", "")
@@ -53,8 +65,15 @@ class HelperApp:
 
 
 def main() -> None:
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
-    HelperApp().run()
+    configure_logging()
+    parser = build_parser()
+    args = parser.parse_args(sys.argv[1:])
+    startup_error = ""
+    try:
+        configure_from_setup_args(args)
+    except Exception as exc:
+        startup_error = f"Setup failed: {exc}"
+    HelperApp(startup_error).run()
 
 
 if __name__ == "__main__":

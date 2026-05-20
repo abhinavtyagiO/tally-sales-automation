@@ -9,6 +9,7 @@ from pathlib import Path
 LOG_PATH = Path(os.environ.get("ACCOUNTPILOT_SMOKE_LOG", "connector-smoke.log"))
 HOST = os.environ.get("ACCOUNTPILOT_SMOKE_HOST", "127.0.0.1")
 PORT = int(os.environ.get("ACCOUNTPILOT_SMOKE_PORT", "18080"))
+AGENT_TOKEN = os.environ.get("ACCOUNTPILOT_SMOKE_AGENT_TOKEN", "registered-smoke-token")
 
 
 class SmokeHandler(BaseHTTPRequestHandler):
@@ -19,6 +20,9 @@ class SmokeHandler(BaseHTTPRequestHandler):
         with LOG_PATH.open("a", encoding="utf-8") as handle:
             handle.write(f"{self.command} {self.path} token={self.headers.get('X-AccountPilot-Agent-Token')} body={body}\n")
 
+        if self.path == "/connector/register":
+            self._json_response({"agent": {"id": 42, "device_name": "AccountPilot Helper"}, "agent_auth_token": AGENT_TOKEN})
+            return
         if self.path == "/connector/poll":
             self._json_response({"job": None})
             return

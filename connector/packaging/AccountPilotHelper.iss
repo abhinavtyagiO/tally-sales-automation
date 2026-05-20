@@ -30,4 +30,4 @@ Name: "desktopicon"; Description: "Create a desktop shortcut"; GroupDescription:
 Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueType: string; ValueName: "AccountPilotHelper"; ValueData: """{app}\{#MyAppExeName}"""; Flags: uninsdeletevalue
 
 [Run]
-Filename: "{app}\{#MyAppExeName}"; Description: "Start AccountPilot Helper"; Flags: nowait postinstall skipifsilent
+Filename: "{app}\{#MyAppExeName}"; Parameters: "--backend-url ""{param:BACKEND_URL|}"" --setup-token ""{param:SETUP_TOKEN|}"" --tally-url ""{param:TALLY_URL|http://127.0.0.1:9000}"""; Description: "Start AccountPilot Helper"; Flags: nowait postinstall skipifsilent

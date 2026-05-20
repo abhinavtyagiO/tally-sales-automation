@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import argparse
+import json
 import logging
 import os
 import time
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Protocol
 
 import requests
@@ -118,20 +120,125 @@ class PollingConnector:
         return f"{self.settings.backend_url.rstrip('/')}{path}"
 
 
-def settings_from_env() -> ConnectorSettings:
-    return ConnectorSettings(
-        backend_url=os.environ["ACCOUNTPILOT_BACKEND_URL"],
-        agent_id=int(os.environ["ACCOUNTPILOT_AGENT_ID"]),
-        agent_token=os.environ["ACCOUNTPILOT_AGENT_TOKEN"],
-        tally_url=os.getenv("TALLY_URL", config.TALLY_URL),
+def default_config_path() -> Path:
+    configured = os.getenv("ACCOUNTPILOT_CONFIG_PATH")
+    if configured:
+        return Path(configured).expanduser()
+    local_app_data = os.getenv("LOCALAPPDATA")
+    if local_app_data:
+        return Path(local_app_data) / "AccountPilot Helper" / "config.json"
+    return Path.home() / ".accountpilot-helper" / "config.json"
+
+
+def default_log_path() -> Path:
+    configured = os.getenv("ACCOUNTPILOT_LOG_PATH")
+    if configured:
+        return Path(configured).expanduser()
+    local_app_data = os.getenv("LOCALAPPDATA")
+    if local_app_data:
+        return Path(local_app_data) / "AccountPilot Helper" / "logs" / "helper.log"
+    return Path.home() / ".accountpilot-helper" / "logs" / "helper.log"
+
+
+def configure_logging() -> None:
+    log_path = default_log_path()
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(levelname)s %(name)s %(message)s",
+        handlers=[logging.FileHandler(log_path, encoding="utf-8"), logging.StreamHandler()],
     )
 
 
-def main() -> None:
+def load_config(path: Path | None = None) -> dict[str, Any]:
+    config_path = path or default_config_path()
+    if not config_path.exists():
+        return {}
+    with config_path.open("r", encoding="utf-8") as handle:
+        data = json.load(handle)
+    return data if isinstance(data, dict) else {}
+
+
+def save_config(data: dict[str, Any], path: Path | None = None) -> None:
+    config_path = path or default_config_path()
+    config_path.parent.mkdir(parents=True, exist_ok=True)
+    with config_path.open("w", encoding="utf-8") as handle:
+        json.dump(data, handle, indent=2, sort_keys=True)
+
+
+def register_with_setup_token(
+    backend_url: str,
+    setup_token: str,
+    tally_url: str | None = None,
+    device_name: str = "AccountPilot Helper",
+    transport: BackendTransport | None = None,
+    config_path: Path | None = None,
+) -> dict[str, Any]:
+    client = transport or requests
+    response = client.post(
+        f"{backend_url.rstrip('/')}/connector/register",
+        json={"setup_token": setup_token, "device_name": device_name},
+        timeout=35,
+    )
+    response.raise_for_status()
+    payload = response.json()
+    agent = payload["agent"]
+    stored = {
+        "backend_url": backend_url.rstrip("/"),
+        "agent_id": int(agent["id"]),
+        "agent_token": payload["agent_auth_token"],
+        "tally_url": tally_url or config.TALLY_URL,
+        "device_name": device_name,
+    }
+    save_config(stored, config_path)
+    return stored
+
+
+def settings_from_env() -> ConnectorSettings:
+    saved = load_config()
+    return ConnectorSettings(
+        backend_url=os.getenv("ACCOUNTPILOT_BACKEND_URL") or saved["backend_url"],
+        agent_id=int(os.getenv("ACCOUNTPILOT_AGENT_ID") or saved["agent_id"]),
+        agent_token=os.getenv("ACCOUNTPILOT_AGENT_TOKEN") or saved["agent_token"],
+        tally_url=os.getenv("TALLY_URL") or saved.get("tally_url", config.TALLY_URL),
+    )
+
+
+def configure_from_setup_args(args: argparse.Namespace) -> dict[str, Any] | None:
+    setup_token = args.setup_token or os.getenv("ACCOUNTPILOT_SETUP_TOKEN")
+    backend_url = args.backend_url or os.getenv("ACCOUNTPILOT_BACKEND_URL")
+    if not setup_token:
+        return None
+    if not backend_url:
+        raise RuntimeError("ACCOUNTPILOT_BACKEND_URL is required when setup token is provided")
+    return register_with_setup_token(
+        backend_url=backend_url,
+        setup_token=setup_token,
+        tally_url=args.tally_url or os.getenv("TALLY_URL") or config.TALLY_URL,
+        device_name=args.device_name,
+    )
+
+
+def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Run AccountPilot polling connector")
     parser.add_argument("--once", action="store_true", help="Poll and execute at most one job")
+    parser.add_argument("--backend-url", default="", help="AccountPilot backend URL used during first-run setup")
+    parser.add_argument("--setup-token", default="", help="One-time setup token from AccountPilot onboarding")
+    parser.add_argument("--tally-url", default="", help="Local Tally URL to persist during setup")
+    parser.add_argument("--device-name", default="AccountPilot Helper", help="Device name shown in AccountPilot")
+    parser.add_argument("--configure-only", action="store_true", help="Register and save credentials without polling")
+    return parser
+
+
+def main() -> None:
+    parser = build_parser()
     args = parser.parse_args()
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
+    configure_logging()
+    configured = configure_from_setup_args(args)
+    if configured:
+        logger.info("connector.configured agent_id=%s", configured["agent_id"])
+    if args.configure_only:
+        return
     connector = PollingConnector(settings_from_env())
     if args.once:
         connector.run_once()

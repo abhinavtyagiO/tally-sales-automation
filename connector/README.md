@@ -20,6 +20,26 @@ python -m connector.main --once
 python -m connector.helper_app
 ```
 
+## First-Run Pairing
+
+AccountPilot Helper can register itself with a setup token created by the web app:
+
+```powershell
+AccountPilotHelper.exe --backend-url "https://api.your-domain.com" --setup-token "one-time-token"
+```
+
+On success it saves its polling credentials to:
+
+```text
+%LOCALAPPDATA%\AccountPilot Helper\config.json
+```
+
+Runtime logs are written to:
+
+```text
+%LOCALAPPDATA%\AccountPilot Helper\logs\helper.log
+```
+
 ## Windows Build
 
 On Windows:
@@ -45,8 +65,7 @@ The installer adds AccountPilot Helper to the current user's Windows startup lis
 
 ## Current MVP Limitations
 
-- Credentials are provided through environment variables for the first packaging pass.
-- The setup-token handoff from web onboarding to installer is not automated yet.
+- Browser downloads do not pass URL query parameters to an `.exe` when the user launches it later. A hosted download endpoint or custom launch flow must pass `/SETUP_TOKEN=...` and `/BACKEND_URL=...` to the installer for fully automatic web-to-installer handoff.
 - The executable and installer are not code-signed yet.
 - Auto-update and crash reporting are not included yet.
 - The UI is a minimal status window, not a tray app.

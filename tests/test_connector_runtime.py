@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import tempfile
 import unittest
+from pathlib import Path
 
-from connector.main import ConnectorSettings, PollingConnector
+from connector.main import ConnectorSettings, PollingConnector, load_config, register_with_setup_token
 
 
 class FakeResponse:
@@ -28,6 +30,15 @@ class FakeTransport:
         if url.endswith("/connector/poll"):
             return FakeResponse(self.poll_payload)
         return FakeResponse({"status": "ok"})
+
+
+class FakeRegistrationTransport:
+    def __init__(self) -> None:
+        self.posts: list[dict] = []
+
+    def post(self, url: str, **kwargs):
+        self.posts.append({"url": url, **kwargs})
+        return FakeResponse({"agent": {"id": 42, "device_name": "AccountPilot Helper"}, "agent_auth_token": "registered-token"})
 
 
 class FakeConnector(PollingConnector):
@@ -77,6 +88,25 @@ class ConnectorRuntimeTests(unittest.TestCase):
 
         self.assertFalse(connector.run_once())
         self.assertEqual(len(transport.posts), 1)
+
+    def test_register_with_setup_token_persists_connector_config(self) -> None:
+        transport = FakeRegistrationTransport()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config_path = Path(tmpdir) / "config.json"
+
+            stored = register_with_setup_token(
+                backend_url="https://api.example.test/",
+                setup_token="setup-secret",
+                tally_url="http://127.0.0.1:9000",
+                transport=transport,
+                config_path=config_path,
+            )
+
+            self.assertEqual(transport.posts[0]["url"], "https://api.example.test/connector/register")
+            self.assertEqual(transport.posts[0]["json"]["setup_token"], "setup-secret")
+            self.assertEqual(stored["agent_id"], 42)
+            self.assertEqual(stored["agent_token"], "registered-token")
+            self.assertEqual(load_config(config_path)["backend_url"], "https://api.example.test")
 
 
 if __name__ == "__main__":

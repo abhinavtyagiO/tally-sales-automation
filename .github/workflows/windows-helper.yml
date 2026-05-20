@@ -99,16 +99,15 @@ jobs:
       - name: Smoke-test packaged helper startup
         shell: pwsh
         env:
-          ACCOUNTPILOT_BACKEND_URL: http://127.0.0.1:18080
-          ACCOUNTPILOT_AGENT_ID: "42"
-          ACCOUNTPILOT_AGENT_TOKEN: ci-smoke-token
-          TALLY_URL: http://127.0.0.1:9000
           ACCOUNTPILOT_SMOKE_LOG: ${{ runner.temp }}\accountpilot-helper-smoke.log
+          ACCOUNTPILOT_SMOKE_AGENT_TOKEN: registered-smoke-token
         run: |
           $backend = Start-Process python -ArgumentList "connector\packaging\smoke_backend.py" -PassThru -NoNewWindow
           Start-Sleep -Seconds 2
 
-          $helper = Start-Process $env:ACCOUNTPILOT_HELPER_EXE -PassThru
+          $configPath = Join-Path $env:RUNNER_TEMP "accountpilot-helper-config.json"
+          $env:ACCOUNTPILOT_CONFIG_PATH = $configPath
+          $helper = Start-Process $env:ACCOUNTPILOT_HELPER_EXE -ArgumentList "--backend-url", "http://127.0.0.1:18080", "--setup-token", "ci-setup-token", "--tally-url", "http://127.0.0.1:9000" -PassThru
           Start-Sleep -Seconds 8
 
           if ($helper.HasExited) {
@@ -122,14 +121,27 @@ jobs:
           if (-not (Test-Path $env:ACCOUNTPILOT_SMOKE_LOG)) {
             throw "Smoke backend did not receive any helper requests"
           }
+          if (-not (Test-Path $configPath)) {
+            throw "Helper did not persist first-run config"
+          }
 
           $log = Get-Content $env:ACCOUNTPILOT_SMOKE_LOG -Raw
           Write-Host $log
+          $config = Get-Content $configPath -Raw | ConvertFrom-Json
+          if ($config.agent_id -ne 42) {
+            throw "Persisted config has unexpected agent_id"
+          }
+          if ($config.agent_token -ne "registered-smoke-token") {
+            throw "Persisted config has unexpected agent_token"
+          }
+          if ($log -notmatch "POST /connector/register") {
+            throw "Helper did not register with setup token"
+          }
           if ($log -notmatch "POST /connector/poll") {
             throw "Helper did not poll /connector/poll"
           }
-          if ($log -notmatch "token=ci-smoke-token") {
-            throw "Helper did not send expected agent token"
+          if ($log -notmatch "token=registered-smoke-token") {
+            throw "Helper did not send registered agent token"
           }
 
       - name: Upload helper artifacts

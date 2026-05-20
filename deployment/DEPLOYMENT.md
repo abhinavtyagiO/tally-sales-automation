@@ -148,6 +148,14 @@ connector\packaging\AccountPilotHelper.iss
 
 Upload the resulting installer to the URL configured as `NEXT_PUBLIC_HELPER_DOWNLOAD_URL`.
 
+For full first-run pairing, the installer must be launched with the setup parameters created by web onboarding:
+
+```powershell
+AccountPilotHelperSetup.exe /BACKEND_URL=https://api.your-domain.com /SETUP_TOKEN=one-time-token /TALLY_URL=http://127.0.0.1:9000
+```
+
+The installed Helper exchanges the setup token at `/connector/register`, saves credentials to `%LOCALAPPDATA%\AccountPilot Helper\config.json`, and then uses those saved credentials for future polling and Windows auto-start.
+
 ## Pre-Deploy Checklist
 
 - Backend image builds.

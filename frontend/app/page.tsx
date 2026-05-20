@@ -246,6 +246,7 @@ export default function Home() {
       if (HELPER_DOWNLOAD_URL) {
         const url = new URL(HELPER_DOWNLOAD_URL, window.location.href);
         url.searchParams.set("setup_token", setup.setup_token);
+        url.searchParams.set("backend_url", apiUrl());
         window.open(url.toString(), "_blank", "noopener,noreferrer");
       }
     } catch (setupError) {
