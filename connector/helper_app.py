@@ -73,6 +73,10 @@ def main() -> None:
         configure_from_setup_args(args)
     except Exception as exc:
         startup_error = f"Setup failed: {exc}"
+    if args.configure_only:
+        if startup_error:
+            raise RuntimeError(startup_error)
+        return
     HelperApp(startup_error).run()
 
 
