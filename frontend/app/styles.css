@@ -477,6 +477,31 @@ h3 {
   gap: 10px;
 }
 
+.helper-command {
+  display: grid;
+  gap: 10px;
+  margin-top: 12px;
+}
+
+.helper-command code {
+  display: block;
+  max-width: min(760px, 100%);
+  overflow-x: auto;
+  border: 1px solid var(--border-soft);
+  border-radius: 8px;
+  background: var(--surface);
+  padding: 12px;
+  color: var(--text);
+  font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+  font-size: 13px;
+  line-height: 20px;
+  white-space: pre;
+}
+
+.helper-command button {
+  justify-self: flex-start;
+}
+
 .status-line {
   display: flex;
   gap: 12px;

@@ -7,6 +7,7 @@ import {
   Building2,
   CheckCircle2,
   ChevronRight,
+  Copy,
   Download,
   FileSpreadsheet,
   History,
@@ -199,6 +200,7 @@ export function SetupView({
   tallyCompanies,
   tallyStatus,
   helperStatus,
+  helperInstallCommand,
   addCompany,
   startHelperSetup,
   showHelperSetup,
@@ -217,6 +219,7 @@ export function SetupView({
   tallyCompanies: TallyCompanies;
   tallyStatus: TallyStatus | null;
   helperStatus: HelperStatus | null;
+  helperInstallCommand: string;
   addCompany: () => void;
   startHelperSetup: () => void;
   showHelperSetup: boolean;
@@ -242,7 +245,14 @@ export function SetupView({
       </section>
       <section className="card form-card">
         {showHelperSetup ? (
-          <HelperSetupPanel status={helperStatus} busy={busy} helperDownloadConfigured={helperDownloadConfigured} startHelperSetup={startHelperSetup} refreshConnection={refreshConnection} />
+          <HelperSetupPanel
+            status={helperStatus}
+            installCommand={helperInstallCommand}
+            busy={busy}
+            helperDownloadConfigured={helperDownloadConfigured}
+            startHelperSetup={startHelperSetup}
+            refreshConnection={refreshConnection}
+          />
         ) : null}
         <TallyConnection status={tallyStatus} />
         <label className="field-label" htmlFor="company-name">
@@ -291,20 +301,29 @@ export function SetupView({
 
 function HelperSetupPanel({
   status,
+  installCommand,
   busy,
   helperDownloadConfigured,
   startHelperSetup,
   refreshConnection,
 }: {
   status: HelperStatus | null;
+  installCommand: string;
   busy: boolean;
   helperDownloadConfigured: boolean;
   startHelperSetup: () => void;
   refreshConnection: () => void;
 }) {
+  const [copied, setCopied] = useState(false);
   const current = status?.status || "helper_required";
   const connected = current === "connected";
   const waiting = current === "waiting_for_helper";
+  async function copyInstallCommand() {
+    if (!installCommand) return;
+    await navigator.clipboard.writeText(installCommand);
+    setCopied(true);
+    window.setTimeout(() => setCopied(false), 1800);
+  }
   return (
     <div className={connected ? "helper-panel connected" : "helper-panel"}>
       <StatusIcon connected={connected} />
@@ -319,6 +338,15 @@ function HelperSetupPanel({
             </button>
             <button className="ghost-button" onClick={refreshConnection} disabled={busy}>
               <RefreshCw size={16} /> Check again
+            </button>
+          </div>
+        )}
+        {installCommand && !connected && (
+          <div className="helper-command">
+            <p className="muted">Run this in PowerShell after the download finishes.</p>
+            <code>{installCommand}</code>
+            <button className="ghost-button" onClick={copyInstallCommand} disabled={busy}>
+              {copied ? <CheckCircle2 size={16} /> : <Copy size={16} />} {copied ? "Copied" : "Copy command"}
             </button>
           </div>
         )}

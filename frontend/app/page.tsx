@@ -33,6 +33,7 @@ export default function Home() {
   const [activeCompanyId, setActiveCompanyId] = useState<number | null>(null);
   const [tallyStatus, setTallyStatus] = useState<TallyStatus | null>(null);
   const [helperStatus, setHelperStatus] = useState<HelperStatus | null>(null);
+  const [helperInstallCommand, setHelperInstallCommand] = useState("");
   const [tallyCompanies, setTallyCompanies] = useState<TallyCompanies>({ available: false, companies: [] });
   const [imports, setImports] = useState<ImportRecord[]>([]);
   const [importDetails, setImportDetails] = useState<Record<number, ImportRow[]>>({});
@@ -247,6 +248,7 @@ export default function Home() {
         const url = new URL(HELPER_DOWNLOAD_URL, window.location.href);
         url.searchParams.set("setup_token", setup.setup_token);
         url.searchParams.set("backend_url", apiUrl());
+        setHelperInstallCommand(buildHelperInstallCommand(apiUrl(), setup.setup_token));
         window.open(url.toString(), "_blank", "noopener,noreferrer");
       }
     } catch (setupError) {
@@ -488,6 +490,7 @@ export default function Home() {
           tallyCompanies={tallyCompanies}
           tallyStatus={tallyStatus}
           helperStatus={helperStatus}
+          helperInstallCommand={helperInstallCommand}
           addCompany={addCompany}
           startHelperSetup={startHelperSetup}
           showHelperSetup={HELPER_SETUP_ENABLED}
@@ -575,4 +578,9 @@ function apiUrl() {
   if (CONFIGURED_API_URL) return CONFIGURED_API_URL;
   if (typeof window === "undefined") return "http://localhost:8000";
   return `${window.location.protocol}//${window.location.hostname}:8000`;
+}
+
+function buildHelperInstallCommand(backendUrl: string, setupToken: string) {
+  const quote = (value: string) => `'${value.replace(/'/g, "''")}'`;
+  return `& "$env:USERPROFILE\\Downloads\\AccountPilotHelperSetup.exe" /BACKEND_URL=${quote(backendUrl)} /SETUP_TOKEN=${quote(setupToken)} /TALLY_URL='http://127.0.0.1:9000'`;
 }
