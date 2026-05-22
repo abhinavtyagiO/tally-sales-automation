@@ -58,7 +58,7 @@ class MvpFlowTests(unittest.TestCase):
             {"name": "Sales", "group": "Sales Accounts"},
         ]
         if include_upi:
-            ledgers.append({"name": "UPI Sales", "group": "Sundry Debtors"})
+            ledgers.append({"name": "UPI", "group": "Bank Accounts"})
         database.replace_ledgers(ledgers)
         database.replace_stock_items(["2.75-18 NGP"])
         database.set_metadata("last_sync_at", datetime.now(timezone.utc).isoformat())
@@ -144,7 +144,7 @@ class MvpFlowTests(unittest.TestCase):
         self.assertEqual(result["ready_count"], 0)
         self.assertEqual(result["skipped_count"], 2)
         self.assertIn("Product not found", result["errors"][0]["error"])
-        self.assertIn("UPI Sales", result["errors"][1]["error"])
+        self.assertIn("UPI", result["errors"][1]["error"])
 
     def test_process_requires_master_cache(self) -> None:
         with self.assertRaises(HTTPException) as raised:
@@ -214,7 +214,7 @@ class MvpFlowTests(unittest.TestCase):
             )
 
         self.assertEqual(result["success_count"], 1)
-        self.assertEqual(fake.created_ledgers, [("UPI Sales", "Sundry Debtors")])
+        self.assertEqual(fake.created_ledgers, [("UPI", "Bank Accounts")])
         logs = database.list_voucher_logs()
         self.assertTrue(any(log["source_fingerprint"] for log in logs if log["status"] == "success"))
 
@@ -271,6 +271,16 @@ class MvpFlowTests(unittest.TestCase):
 
         self.assertIn("data", sent)
         self.assertNotIn("Source", sent["data"])
+        self.assertIn('OBJVIEW="Invoice Voucher View"', sent["data"])
+        self.assertIn("<ISINVOICE>Yes</ISINVOICE>", sent["data"])
+        self.assertIn("<ALLINVENTORYENTRIES.LIST>", sent["data"])
+        self.assertIn("<STOCKITEMNAME>2.75-18 NGP</STOCKITEMNAME>", sent["data"])
+        self.assertIn("<SVVCHIMPORTFORMAT>XML</SVVCHIMPORTFORMAT>", sent["data"])
+        self.assertIn("<RATE>1600.00/nos</RATE>", sent["data"])
+        self.assertIn("<BILLEDQTY>1 nos</BILLEDQTY>", sent["data"])
+        self.assertIn("<BATCHALLOCATIONS.LIST>", sent["data"])
+        self.assertIn("<ACCOUNTINGALLOCATIONS.LIST>", sent["data"])
+        self.assertIn("<LEDGERNAME>Sales</LEDGERNAME>", sent["data"])
         self.assertIn("ENVELOPE", result)
 
     def test_tally_client_surfaces_xml_line_errors(self) -> None:

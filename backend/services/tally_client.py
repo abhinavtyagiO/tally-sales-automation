@@ -161,14 +161,14 @@ class TallyClient:
 
     def get_companies(self) -> list[str]:
         try:
-            data = self.export_data("Company")
+            data = self._post_xml(_companies_collection_xml())
         except TallyError:
             return []
         companies = _extract_collection(data, "Company")
         names = [
-            str(_get_ci(item, "Name") or _get_ci(item, "CompanyName"))
+            _text_value(_get_ci(item, "Name") or _get_ci(item, "CompanyName"))
             for item in companies
-            if _get_ci(item, "Name") or _get_ci(item, "CompanyName")
+            if _text_value(_get_ci(item, "Name") or _get_ci(item, "CompanyName"))
         ]
         if names:
             return sorted(set(names), key=str.lower)
@@ -417,7 +417,8 @@ def _sales_voucher_xml(voucher: dict[str, Any], company_name: str | None = None)
         company_xml = f"<SVCURRENTCOMPANY>{_xml_text(company_name)}</SVCURRENTCOMPANY>"
 
     party_entry = _ledger_entry_xml(voucher["PartyLedgerName"], voucher["LedgerEntries"][1]["Amount"], is_party=True)
-    sales_entry = _ledger_entry_xml(voucher["LedgerEntries"][0]["LedgerName"], voucher["LedgerEntries"][0]["Amount"])
+    sales_ledger_name = voucher["LedgerEntries"][0]["LedgerName"]
+    inventory_entries = "\n".join(_inventory_entry_xml(item, sales_ledger_name) for item in voucher.get("InventoryEntries", []))
 
     return f"""<ENVELOPE>
   <HEADER>
@@ -428,23 +429,25 @@ def _sales_voucher_xml(voucher: dict[str, Any], company_name: str | None = None)
   </HEADER>
   <BODY>
     <DESC>
-        <STATICVARIABLES>
+      <STATICVARIABLES>
           {company_xml}
+          <SVVCHIMPORTFORMAT>XML</SVVCHIMPORTFORMAT>
           <IMPORTDUPS>@@DUPCOMBINE</IMPORTDUPS>
         </STATICVARIABLES>
     </DESC>
     <DATA>
         <TALLYMESSAGE xmlns:UDF="TallyUDF">
-          <VOUCHER VCHTYPE="{voucher_type}" ACTION="Create" OBJVIEW="Accounting Voucher View">
+          <VOUCHER VCHTYPE="{voucher_type}" ACTION="Create" OBJVIEW="Invoice Voucher View">
             <DATE>{voucher_date}</DATE>
+            <VCHSTATUSDATE>{voucher_date}</VCHSTATUSDATE>
             <EFFECTIVEDATE>{voucher_date}</EFFECTIVEDATE>
             <VOUCHERTYPENAME>{voucher_type}</VOUCHERTYPENAME>
             <VOUCHERNUMBER>{voucher_number}</VOUCHERNUMBER>
             <PARTYLEDGERNAME>{party_ledger}</PARTYLEDGERNAME>
-            <PERSISTEDVIEW>Accounting Voucher View</PERSISTEDVIEW>
-            <ISINVOICE>No</ISINVOICE>
+            <PERSISTEDVIEW>Invoice Voucher View</PERSISTEDVIEW>
+            <ISINVOICE>Yes</ISINVOICE>
+            {inventory_entries}
             {party_entry}
-            {sales_entry}
           </VOUCHER>
         </TALLYMESSAGE>
     </DATA>
@@ -503,6 +506,24 @@ def _stock_items_collection_xml(company_name: str | None = None) -> str:
           </COLLECTION>
         </TDLMESSAGE>
       </TDL>
+    </DESC>
+  </BODY>
+</ENVELOPE>"""
+
+
+def _companies_collection_xml() -> str:
+    return """<ENVELOPE>
+  <HEADER>
+    <VERSION>1</VERSION>
+    <TALLYREQUEST>Export</TALLYREQUEST>
+    <TYPE>Collection</TYPE>
+    <ID>Company</ID>
+  </HEADER>
+  <BODY>
+    <DESC>
+      <STATICVARIABLES>
+        <SVEXPORTFORMAT>XML</SVEXPORTFORMAT>
+      </STATICVARIABLES>
     </DESC>
   </BODY>
 </ENVELOPE>"""
@@ -628,8 +649,9 @@ def _ledger_master_xml(name: str, group_name: str, company_name: str | None = No
 def _inventory_entry_xml(item: dict[str, Any], sales_ledger_name: str) -> str:
     stock_item = _xml_text(item["StockItemName"])
     amount = _xml_amount(item["Amount"])
-    rate = f"{_xml_amount(item.get('Rate', item['Amount']))}/Nos"
-    quantity = _xml_quantity(item.get("Quantity", 1))
+    unit = str(item.get("Unit") or item.get("BaseUnit") or "nos")
+    rate = f"{_xml_amount(item.get('Rate', item['Amount']))}/{_xml_text(unit)}"
+    quantity = _xml_quantity_with_unit(item.get("Quantity", 1), unit)
     sales_ledger = _xml_text(sales_ledger_name)
     return f"""<ALLINVENTORYENTRIES.LIST>
               <STOCKITEMNAME>{stock_item}</STOCKITEMNAME>
@@ -638,6 +660,13 @@ def _inventory_entry_xml(item: dict[str, Any], sales_ledger_name: str) -> str:
               <AMOUNT>{amount}</AMOUNT>
               <ACTUALQTY>{quantity}</ACTUALQTY>
               <BILLEDQTY>{quantity}</BILLEDQTY>
+              <BATCHALLOCATIONS.LIST>
+                <GODOWNNAME>Main Location</GODOWNNAME>
+                <BATCHNAME>Primary Batch</BATCHNAME>
+                <AMOUNT>{amount}</AMOUNT>
+                <ACTUALQTY>{quantity}</ACTUALQTY>
+                <BILLEDQTY>{quantity}</BILLEDQTY>
+              </BATCHALLOCATIONS.LIST>
               <ACCOUNTINGALLOCATIONS.LIST>
                 <LEDGERNAME>{sales_ledger}</LEDGERNAME>
                 <ISDEEMEDPOSITIVE>No</ISDEEMEDPOSITIVE>

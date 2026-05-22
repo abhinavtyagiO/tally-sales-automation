@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from fastapi import HTTPException
 
+from backend import config
 from backend.db import database
 
 
@@ -13,6 +14,8 @@ def require_company(user_id: int, company_id: int) -> dict:
 
 
 def company_has_online_agent(company: dict) -> dict:
+    if config.CONNECTOR_MODE != "polling":
+        return {"id": None, "direct_tally": True, "base_url": company.get("tally_url") or config.TALLY_URL}
     agent_id = company.get("local_agent_id")
     if not agent_id:
         raise HTTPException(status_code=400, detail="Company has no paired local agent")

@@ -21,7 +21,7 @@ export type Company = {
 };
 
 export type TallyStatus = {
-  status: "connected" | "disconnected";
+  status: "connected" | "disconnected" | "checking";
   detail?: string | null;
   message: string;
 };
@@ -30,6 +30,12 @@ export type TallyCompanies = {
   available: boolean;
   companies: string[];
   message?: string | null;
+};
+
+export type HelperStatus = {
+  status: "helper_required" | "waiting_for_helper" | "connected" | "stale";
+  message: string;
+  agent?: { id: number; device_name: string; last_seen_at?: string | null } | null;
 };
 
 export type ImportRecord = {
@@ -119,6 +125,18 @@ export type CommitSummary = {
   failed_count: number;
   rows: ImportRow[];
   results: CommitResult[];
+};
+
+export type CommitRun = {
+  id: number;
+  company_id: number;
+  import_id: number;
+  status: "queued" | "processing" | "completed" | "failed";
+  total_count: number;
+  success_count: number;
+  failed_count: number;
+  error_message?: string | null;
+  result?: CommitSummary | Record<string, never>;
 };
 
 export type AppView = "dashboard" | "inventory" | "upload" | "preview" | "result" | "history" | "historyDetail";

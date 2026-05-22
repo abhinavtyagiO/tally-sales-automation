@@ -1,0 +1,179 @@
+name: Windows Helper
+
+on:
+  pull_request:
+    paths:
+      - ".github/workflows/windows-helper.yml"
+      - "backend/**"
+      - "connector/**"
+      - "requirements.txt"
+      - "tests/test_connector_runtime.py"
+  push:
+    branches:
+      - main
+    paths:
+      - ".github/workflows/windows-helper.yml"
+      - "backend/**"
+      - "connector/**"
+      - "requirements.txt"
+      - "tests/test_connector_runtime.py"
+  workflow_dispatch:
+
+jobs:
+  build-and-smoke:
+    name: Build and smoke-test helper
+    runs-on: windows-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Run connector unit tests
+        shell: pwsh
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt
+          python -m unittest tests.test_connector_runtime
+
+      - name: Build helper executable
+        shell: pwsh
+        run: .\connector\packaging\build_windows.ps1
+
+      - name: Verify helper executable exists
+        shell: pwsh
+        run: |
+          if (-not (Test-Path "connector\dist\AccountPilotHelper.exe")) {
+            throw "Missing connector\dist\AccountPilotHelper.exe"
+          }
+
+      - name: Install Inno Setup
+        shell: pwsh
+        run: choco install innosetup --no-progress -y
+
+      - name: Build helper installer
+        shell: pwsh
+        run: |
+          $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
+          if (-not (Test-Path $iscc)) {
+            throw "Inno Setup compiler not found at $iscc"
+          }
+          & $iscc "connector\packaging\AccountPilotHelper.iss"
+
+      - name: Verify helper installer exists
+        shell: pwsh
+        run: |
+          if (-not (Test-Path "connector\dist\AccountPilotHelperSetup.exe")) {
+            throw "Missing connector\dist\AccountPilotHelperSetup.exe"
+          }
+
+      - name: Smoke-test silent installer and auto-start registration
+        shell: pwsh
+        env:
+          ACCOUNTPILOT_SMOKE_LOG: ${{ runner.temp }}\accountpilot-installer-smoke.log
+          ACCOUNTPILOT_SMOKE_AGENT_TOKEN: installer-registered-token
+        run: |
+          $backend = Start-Process python -ArgumentList "connector\packaging\smoke_backend.py" -PassThru -NoNewWindow
+          Start-Sleep -Seconds 2
+
+          $installDir = Join-Path $env:RUNNER_TEMP "AccountPilot Helper"
+          $configPath = Join-Path $env:RUNNER_TEMP "accountpilot-helper-installer-config.json"
+          $env:ACCOUNTPILOT_CONFIG_PATH = $configPath
+          $installer = Resolve-Path "connector\dist\AccountPilotHelperSetup.exe"
+          $process = Start-Process $installer -ArgumentList "/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART", "/DIR=`"$installDir`"", "/BACKEND_URL=http://127.0.0.1:18080", "/SETUP_TOKEN=installer-setup-token", "/TALLY_URL=http://127.0.0.1:9000" -PassThru -Wait
+          if ($process.ExitCode -ne 0) {
+            Stop-Process -Id $backend.Id -Force -ErrorAction SilentlyContinue
+            throw "Installer exited with code $($process.ExitCode)"
+          }
+          Start-Sleep -Seconds 8
+
+          $installedExe = Join-Path $installDir "AccountPilotHelper.exe"
+          if (-not (Test-Path $installedExe)) {
+            Stop-Process -Id $backend.Id -Force -ErrorAction SilentlyContinue
+            throw "Installer did not create $installedExe"
+          }
+
+          $runKey = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Run"
+          $runValue = (Get-ItemProperty -Path $runKey -Name "AccountPilotHelper").AccountPilotHelper
+          Write-Host "Auto-start value: $runValue"
+          if ($runValue -notlike "*$installedExe*") {
+            Stop-Process -Id $backend.Id -Force -ErrorAction SilentlyContinue
+            throw "Auto-start registry value does not point at installed helper"
+          }
+
+          Get-Process AccountPilotHelper -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+          Stop-Process -Id $backend.Id -Force -ErrorAction SilentlyContinue
+
+          if (-not (Test-Path $configPath)) {
+            throw "Installer-launched helper did not persist first-run config"
+          }
+          $log = Get-Content $env:ACCOUNTPILOT_SMOKE_LOG -Raw
+          Write-Host $log
+          $config = Get-Content $configPath -Raw | ConvertFrom-Json
+          if ($config.agent_token -ne "installer-registered-token") {
+            throw "Installer-launched helper persisted unexpected agent token"
+          }
+          if ($log -notmatch "POST /connector/register") {
+            throw "Installer-launched helper did not register with setup token"
+          }
+
+          "ACCOUNTPILOT_HELPER_EXE=$installedExe" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "ACCOUNTPILOT_INSTALLER_CONFIG_PATH=$configPath" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - name: Smoke-test packaged helper startup
+        shell: pwsh
+        env:
+          ACCOUNTPILOT_SMOKE_LOG: ${{ runner.temp }}\accountpilot-helper-smoke.log
+          ACCOUNTPILOT_SMOKE_AGENT_TOKEN: installer-registered-token
+        run: |
+          $backend = Start-Process python -ArgumentList "connector\packaging\smoke_backend.py" -PassThru -NoNewWindow
+          Start-Sleep -Seconds 2
+
+          $env:ACCOUNTPILOT_CONFIG_PATH = $env:ACCOUNTPILOT_INSTALLER_CONFIG_PATH
+          $helper = Start-Process $env:ACCOUNTPILOT_HELPER_EXE -PassThru
+          Start-Sleep -Seconds 8
+
+          if ($helper.HasExited) {
+            Stop-Process -Id $backend.Id -Force -ErrorAction SilentlyContinue
+            throw "AccountPilotHelper.exe exited during startup smoke test"
+          }
+
+          Stop-Process -Id $helper.Id -Force -ErrorAction SilentlyContinue
+          Stop-Process -Id $backend.Id -Force -ErrorAction SilentlyContinue
+
+          if (-not (Test-Path $env:ACCOUNTPILOT_SMOKE_LOG)) {
+            throw "Smoke backend did not receive any helper requests"
+          }
+          if (-not (Test-Path $env:ACCOUNTPILOT_INSTALLER_CONFIG_PATH)) {
+            throw "Helper persisted config is missing"
+          }
+
+          $log = Get-Content $env:ACCOUNTPILOT_SMOKE_LOG -Raw
+          Write-Host $log
+          $config = Get-Content $env:ACCOUNTPILOT_INSTALLER_CONFIG_PATH -Raw | ConvertFrom-Json
+          if ($config.agent_id -ne 42) {
+            throw "Persisted config has unexpected agent_id"
+          }
+          if ($config.agent_token -ne "installer-registered-token") {
+            throw "Persisted config has unexpected agent_token"
+          }
+          if ($log -notmatch "POST /connector/poll") {
+            throw "Helper did not poll /connector/poll"
+          }
+          if ($log -notmatch "token=installer-registered-token") {
+            throw "Helper did not send registered agent token"
+          }
+
+      - name: Upload helper artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: accountpilot-helper-windows
+          path: |
+            connector/dist/AccountPilotHelper.exe
+            connector/dist/AccountPilotHelperSetup.exe
+          if-no-files-found: error
