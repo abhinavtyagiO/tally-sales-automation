@@ -86,7 +86,7 @@ def init_db() -> None:
                 cash_ledger_group_name TEXT NOT NULL DEFAULT 'Cash-in-Hand',
                 upi_fallback_ledger_name TEXT NOT NULL,
                 upi_fallback_group_name TEXT NOT NULL,
-                payment_default_group_name TEXT NOT NULL DEFAULT 'Sundry Debtors',
+                payment_default_group_name TEXT NOT NULL DEFAULT 'Bank Accounts',
                 payment_ledger_mappings TEXT,
                 setup_completed_at TEXT,
                 last_sync_at TEXT,
@@ -338,7 +338,10 @@ def _migrate_existing_tables(connection: sqlite3.Connection) -> None:
         _ensure_column(connection, table, column, definition)
     connection.execute("UPDATE companies SET sales_ledger_group_name = COALESCE(sales_ledger_group_name, ?) ", (config.SALES_LEDGER_GROUP,))
     connection.execute("UPDATE companies SET cash_ledger_group_name = COALESCE(cash_ledger_group_name, ?) ", (config.CASH_LEDGER_GROUP,))
+    connection.execute("UPDATE companies SET upi_fallback_ledger_name = ? WHERE upi_fallback_ledger_name = 'UPI Sales'", (config.UPI_FALLBACK_LEDGER,))
+    connection.execute("UPDATE companies SET upi_fallback_group_name = ? WHERE upi_fallback_group_name = 'Sundry Debtors'", (config.UPI_FALLBACK_GROUP,))
     connection.execute("UPDATE companies SET payment_default_group_name = COALESCE(payment_default_group_name, ?) ", (config.DEFAULT_PAYMENT_LEDGER_GROUP,))
+    connection.execute("UPDATE companies SET payment_default_group_name = ? WHERE payment_default_group_name = 'Sundry Debtors'", (config.DEFAULT_PAYMENT_LEDGER_GROUP,))
     connection.execute("UPDATE companies SET gst_registration_name = COALESCE(gst_registration_name, ?) ", (config.GST_REGISTRATION_NAME,))
     connection.execute("UPDATE companies SET gst_registration_type = COALESCE(gst_registration_type, ?) ", (config.GST_REGISTRATION_TYPE,))
     connection.execute("UPDATE companies SET gst_sales_ledger_name = COALESCE(gst_sales_ledger_name, ?) ", (config.GST_SALES_LEDGER_NAME,))
@@ -1602,9 +1605,9 @@ def ensure_legacy_company() -> dict[str, Any]:
             "sales_ledger_group_name": "Sales Accounts",
             "cash_ledger_name": "Cash",
             "cash_ledger_group_name": "Cash-in-Hand",
-            "upi_fallback_ledger_name": "UPI Sales",
-            "upi_fallback_group_name": "Sundry Debtors",
-            "payment_default_group_name": "Sundry Debtors",
+            "upi_fallback_ledger_name": "UPI",
+            "upi_fallback_group_name": "Bank Accounts",
+            "payment_default_group_name": "Bank Accounts",
         },
     )
 

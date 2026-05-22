@@ -58,7 +58,7 @@ class MvpFlowTests(unittest.TestCase):
             {"name": "Sales", "group": "Sales Accounts"},
         ]
         if include_upi:
-            ledgers.append({"name": "UPI Sales", "group": "Sundry Debtors"})
+            ledgers.append({"name": "UPI", "group": "Bank Accounts"})
         database.replace_ledgers(ledgers)
         database.replace_stock_items(["2.75-18 NGP"])
         database.set_metadata("last_sync_at", datetime.now(timezone.utc).isoformat())
@@ -144,7 +144,7 @@ class MvpFlowTests(unittest.TestCase):
         self.assertEqual(result["ready_count"], 0)
         self.assertEqual(result["skipped_count"], 2)
         self.assertIn("Product not found", result["errors"][0]["error"])
-        self.assertIn("UPI Sales", result["errors"][1]["error"])
+        self.assertIn("UPI", result["errors"][1]["error"])
 
     def test_process_requires_master_cache(self) -> None:
         with self.assertRaises(HTTPException) as raised:
@@ -214,7 +214,7 @@ class MvpFlowTests(unittest.TestCase):
             )
 
         self.assertEqual(result["success_count"], 1)
-        self.assertEqual(fake.created_ledgers, [("UPI Sales", "Sundry Debtors")])
+        self.assertEqual(fake.created_ledgers, [("UPI", "Bank Accounts")])
         logs = database.list_voucher_logs()
         self.assertTrue(any(log["source_fingerprint"] for log in logs if log["status"] == "success"))
 

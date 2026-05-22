@@ -38,8 +38,8 @@ class Parent2FlowTests(unittest.TestCase):
                 "tally_url": "http://localhost:9000",
                 "sales_ledger_name": "Sales",
                 "cash_ledger_name": "Cash",
-                "upi_fallback_ledger_name": "UPI Sales",
-                "upi_fallback_group_name": "Sundry Debtors",
+                "upi_fallback_ledger_name": "UPI",
+                "upi_fallback_group_name": "Bank Accounts",
             },
         )
 
@@ -77,7 +77,7 @@ class Parent2FlowTests(unittest.TestCase):
             {"name": "Sales", "group": "Sales Accounts"},
         ]
         if include_upi:
-            ledgers.append({"name": "UPI Sales", "group": "Sundry Debtors"})
+            ledgers.append({"name": "UPI", "group": "Bank Accounts"})
         database.replace_ledgers(ledgers, company_id=company["id"])
         database.replace_stock_items(["2.75-18 NGP"], company_id=company["id"])
         database.set_company_sync(company["id"], "success", database.utc_now())
@@ -101,6 +101,27 @@ class Parent2FlowTests(unittest.TestCase):
         self.assertEqual(user["email"], "new@example.test")
         cookie = response.headers["set-cookie"]
         self.assertIn(auth_service.SESSION_COOKIE, cookie)
+
+    def test_db_migration_replaces_old_payment_group_defaults(self) -> None:
+        company = database.create_company(
+            self.user["id"],
+            {
+                "company_name": "Legacy Defaults",
+                "tally_url": "http://localhost:9000",
+                "sales_ledger_name": "Sales",
+                "cash_ledger_name": "Cash",
+                "upi_fallback_ledger_name": "UPI Sales",
+                "upi_fallback_group_name": "Sundry Debtors",
+                "payment_default_group_name": "Sundry Debtors",
+            },
+        )
+
+        database.init_db()
+        migrated = database.get_company(company["id"], user_id=self.user["id"])
+
+        self.assertEqual(migrated["upi_fallback_ledger_name"], "UPI")
+        self.assertEqual(migrated["upi_fallback_group_name"], "Bank Accounts")
+        self.assertEqual(migrated["payment_default_group_name"], "Bank Accounts")
 
     def test_dev_auth_is_rejected_unless_enabled(self) -> None:
         config.ALLOW_DEV_AUTH = False
@@ -784,7 +805,7 @@ class Parent2FlowTests(unittest.TestCase):
             if operation == "health_check":
                 return {"status": "connected"}
             if operation == "create_ledger":
-                self.assertEqual(payload["name"], "UPI Sales")
+                self.assertEqual(payload["name"], "UPI")
                 self.assertEqual(payload["company_name"], "Bhrama Enterprises")
                 return {"STATUS": "1"}
             if operation == "create_sales_voucher":
@@ -798,7 +819,7 @@ class Parent2FlowTests(unittest.TestCase):
         self.assertEqual(processed["rows"][0]["validation_status"], "valid")
         self.assertEqual(committed["success_count"], 1)
         self.assertIn("create_ledger", operations)
-        self.assertIsNotNone(database.get_ledger_by_name("UPI Sales", company_id=company["id"]))
+        self.assertIsNotNone(database.get_ledger_by_name("UPI", company_id=company["id"]))
 
     def test_missing_configured_ledgers_are_created_on_commit(self) -> None:
         company = self.make_company()
@@ -810,7 +831,7 @@ class Parent2FlowTests(unittest.TestCase):
                 "local_agent_id": agent["id"],
                 "sales_ledger_name": "Retail Sales",
                 "sales_ledger_group_name": "Sales Accounts",
-                "payment_default_group_name": "Sundry Debtors",
+                "payment_default_group_name": "Bank Accounts",
                 "payment_ledger_mappings": {
                     "card": {"ledger_name": "Card Collections", "group_name": "Bank Accounts"},
                 },
