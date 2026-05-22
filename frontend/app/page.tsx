@@ -34,6 +34,7 @@ export default function Home() {
   const [tallyStatus, setTallyStatus] = useState<TallyStatus | null>(null);
   const [helperStatus, setHelperStatus] = useState<HelperStatus | null>(null);
   const [helperInstallCommand, setHelperInstallCommand] = useState("");
+  const [helperDownloadHref, setHelperDownloadHref] = useState("");
   const [tallyCompanies, setTallyCompanies] = useState<TallyCompanies>({ available: false, companies: [] });
   const [imports, setImports] = useState<ImportRecord[]>([]);
   const [importDetails, setImportDetails] = useState<Record<number, ImportRow[]>>({});
@@ -51,6 +52,7 @@ export default function Home() {
   const [historyDetail, setHistoryDetail] = useState<ImportPreview | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
+  const helperSetupInFlight = useRef(false);
 
   const activeCompany = useMemo(
     () => companies.find((company) => company.id === activeCompanyId) || companies[0] || null,
@@ -107,6 +109,11 @@ export default function Home() {
     }, 5000);
     return () => window.clearInterval(interval);
   }, [user, helperStatus?.status]);
+
+  useEffect(() => {
+    if (!HELPER_SETUP_ENABLED || !user || !helperStatus || helperStatus.status === "connected" || helperInstallCommand) return;
+    void prepareHelperSetup();
+  }, [user, helperStatus?.status, helperInstallCommand]);
 
   async function api(path: string, init: RequestInit = {}) {
     const response = await fetch(`${apiUrl()}${path}`, {
@@ -242,19 +249,28 @@ export default function Home() {
     setBusy(true);
     setError("");
     try {
-      const setup = await api("/connector/setup-session", { method: "POST", body: JSON.stringify({}) });
-      await loadHelperStatus();
-      if (HELPER_DOWNLOAD_URL) {
-        const url = new URL(HELPER_DOWNLOAD_URL, window.location.href);
-        url.searchParams.set("setup_token", setup.setup_token);
-        url.searchParams.set("backend_url", apiUrl());
-        setHelperInstallCommand(buildHelperInstallCommand(apiUrl(), setup.setup_token));
-        window.open(url.toString(), "_blank", "noopener,noreferrer");
-      }
+      const setup = await prepareHelperSetup();
+      const downloadHref = setup?.downloadHref || helperDownloadHref;
+      if (downloadHref) window.open(downloadHref, "_blank", "noopener,noreferrer");
     } catch (setupError) {
       setError(setupError instanceof Error ? setupError.message : "Unable to start AccountPilot Helper setup");
     } finally {
       setBusy(false);
+    }
+  }
+
+  async function prepareHelperSetup() {
+    if (!HELPER_SETUP_ENABLED || helperSetupInFlight.current) return null;
+    helperSetupInFlight.current = true;
+    try {
+      const setup = await api("/connector/setup-session", { method: "POST", body: JSON.stringify({}) });
+      const downloadHref = buildHelperDownloadHref(setup.setup_token);
+      setHelperDownloadHref(downloadHref);
+      setHelperInstallCommand(buildHelperInstallCommand(apiUrl(), setup.setup_token));
+      await loadHelperStatus();
+      return { downloadHref, setupToken: setup.setup_token };
+    } finally {
+      helperSetupInFlight.current = false;
     }
   }
 
@@ -491,6 +507,7 @@ export default function Home() {
           tallyStatus={tallyStatus}
           helperStatus={helperStatus}
           helperInstallCommand={helperInstallCommand}
+          helperDownloadHref={helperDownloadHref}
           addCompany={addCompany}
           startHelperSetup={startHelperSetup}
           showHelperSetup={HELPER_SETUP_ENABLED}
@@ -583,4 +600,12 @@ function apiUrl() {
 function buildHelperInstallCommand(backendUrl: string, setupToken: string) {
   const quote = (value: string) => `'${value.replace(/'/g, "''")}'`;
   return `& "$env:USERPROFILE\\Downloads\\AccountPilotHelperSetup.exe" /BACKEND_URL=${quote(backendUrl)} /SETUP_TOKEN=${quote(setupToken)} /TALLY_URL='http://127.0.0.1:9000'`;
+}
+
+function buildHelperDownloadHref(setupToken: string) {
+  if (!HELPER_DOWNLOAD_URL) return "";
+  const url = new URL(HELPER_DOWNLOAD_URL, window.location.href);
+  url.searchParams.set("setup_token", setupToken);
+  url.searchParams.set("backend_url", apiUrl());
+  return url.toString();
 }
