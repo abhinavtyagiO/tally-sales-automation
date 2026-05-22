@@ -72,6 +72,8 @@ def _validate_runtime_config() -> None:
         raise RuntimeError("Production must set COOKIE_SECURE=true")
     if COOKIE_SAMESITE not in {"none", "lax", "strict"}:
         raise RuntimeError("COOKIE_SAMESITE must be one of: none, lax, strict")
+    if COOKIE_SAMESITE != "none":
+        raise RuntimeError("Production must set COOKIE_SAMESITE=none for cross-origin frontend sessions")
 
 
 _validate_runtime_config()
