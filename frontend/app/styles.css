@@ -502,6 +502,16 @@ h3 {
   justify-self: flex-start;
 }
 
+.text-link {
+  color: var(--primary);
+  font-weight: 700;
+  text-decoration: none;
+}
+
+.text-link:hover {
+  text-decoration: underline;
+}
+
 .status-line {
   display: flex;
   gap: 12px;

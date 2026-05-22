@@ -201,6 +201,7 @@ export function SetupView({
   tallyStatus,
   helperStatus,
   helperInstallCommand,
+  helperDownloadHref,
   addCompany,
   startHelperSetup,
   showHelperSetup,
@@ -220,6 +221,7 @@ export function SetupView({
   tallyStatus: TallyStatus | null;
   helperStatus: HelperStatus | null;
   helperInstallCommand: string;
+  helperDownloadHref: string;
   addCompany: () => void;
   startHelperSetup: () => void;
   showHelperSetup: boolean;
@@ -248,6 +250,7 @@ export function SetupView({
           <HelperSetupPanel
             status={helperStatus}
             installCommand={helperInstallCommand}
+            downloadHref={helperDownloadHref}
             busy={busy}
             helperDownloadConfigured={helperDownloadConfigured}
             startHelperSetup={startHelperSetup}
@@ -302,6 +305,7 @@ export function SetupView({
 function HelperSetupPanel({
   status,
   installCommand,
+  downloadHref,
   busy,
   helperDownloadConfigured,
   startHelperSetup,
@@ -309,6 +313,7 @@ function HelperSetupPanel({
 }: {
   status: HelperStatus | null;
   installCommand: string;
+  downloadHref: string;
   busy: boolean;
   helperDownloadConfigured: boolean;
   startHelperSetup: () => void;
@@ -343,11 +348,16 @@ function HelperSetupPanel({
         )}
         {installCommand && !connected && (
           <div className="helper-command">
-            <p className="muted">Run this in PowerShell after the download finishes.</p>
+            <p className="muted">Run this in PowerShell after downloading the installer.</p>
             <code>{installCommand}</code>
             <button className="ghost-button" onClick={copyInstallCommand} disabled={busy}>
               {copied ? <CheckCircle2 size={16} /> : <Copy size={16} />} {copied ? "Copied" : "Copy command"}
             </button>
+            {downloadHref && (
+              <a className="text-link" href={downloadHref} target="_blank" rel="noreferrer">
+                Open installer download
+              </a>
+            )}
           </div>
         )}
         {!helperDownloadConfigured && !connected && <p className="muted">Helper download is not configured for this environment.</p>}
