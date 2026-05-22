@@ -18,6 +18,10 @@ def _load_local_env() -> None:
 
 _load_local_env()
 
+
+def _parse_csv(value: str) -> list[str]:
+    return [item.strip() for item in value.split(",") if item.strip()]
+
 APP_ENV = os.getenv("APP_ENV", "development").lower()
 DATABASE_URL = os.getenv("DATABASE_URL", "")
 SQLITE_DB_PATH = os.getenv("SQLITE_DB_PATH", "")
@@ -34,11 +38,11 @@ ALLOW_DEV_AUTH = os.getenv("ALLOW_DEV_AUTH", "false").lower() == "true"
 SESSION_TTL_DAYS = int(os.getenv("SESSION_TTL_DAYS", "7"))
 COOKIE_SECURE = os.getenv("COOKIE_SECURE", "false").lower() == "true"
 COOKIE_SAMESITE = os.getenv("COOKIE_SAMESITE", "lax").lower()
-CORS_ALLOWED_ORIGINS = [
-    origin.strip()
-    for origin in os.getenv("CORS_ALLOWED_ORIGINS", "http://localhost:3000,http://127.0.0.1:3000").split(",")
-    if origin.strip()
-]
+RENDER_FRONTEND_ORIGIN = "https://accountpilot.onrender.com"
+DEFAULT_CORS_ALLOWED_ORIGINS = ["http://localhost:3000", "http://127.0.0.1:3000", RENDER_FRONTEND_ORIGIN]
+CORS_ALLOWED_ORIGINS = _parse_csv(os.getenv("CORS_ALLOWED_ORIGINS", "")) or list(DEFAULT_CORS_ALLOWED_ORIGINS)
+if RENDER_FRONTEND_ORIGIN not in CORS_ALLOWED_ORIGINS:
+    CORS_ALLOWED_ORIGINS.append(RENDER_FRONTEND_ORIGIN)
 SALES_LEDGER_NAME = os.getenv("SALES_LEDGER_NAME", "Sales")
 SALES_LEDGER_GROUP = os.getenv("SALES_LEDGER_GROUP", "Sales Accounts")
 CASH_LEDGER_NAME = os.getenv("CASH_LEDGER_NAME", "Cash")
