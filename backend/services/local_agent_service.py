@@ -57,7 +57,7 @@ def dispatch_tally_operation(agent: dict[str, Any], operation: str, payload: dic
         response = requests.post(
             f"{base_url}/tally/execute",
             json={"operation": operation, "payload": payload},
-            headers={"X-AccountPilot-Agent-Token": agent["auth_token"]} if agent.get("auth_token") else None,
+            headers=_agent_headers(agent),
             timeout=30,
         )
         if response.status_code >= 400:
@@ -99,7 +99,11 @@ def get_or_create_active_agent(user_id: int) -> dict[str, Any]:
         logger.info("local_agent.active_agent.found user_id=%s agent_id=%s base_url=%s", user_id, agent["id"], agent.get("base_url"))
         return agent
 
-    base_url = config.LOCAL_AGENT_URL.rstrip("/")
+    if not config.LOCAL_AGENT_BOOTSTRAP_ENABLED:
+        logger.warning("local_agent.bootstrap.disabled user_id=%s", user_id)
+        raise TallyError("Tally connection is not available")
+
+    base_url = config.LOCAL_AGENT_URL.rstrip()
     if not base_url:
         logger.warning("local_agent.bootstrap.failed user_id=%s reason=missing_local_agent_url", user_id)
         raise TallyError("Tally connection is not available")
@@ -116,13 +120,16 @@ def _hash_pairing_token(token: str) -> str:
     return hash_token(token)
 
 
-def _public_agent(agent: dict[str, Any]) -> dict[str, Any]:
-    public = dict(agent)
-    public.pop("auth_token", None)
-    return public
-
-
 def _format_local_agent_error(detail: str) -> str:
     if detail.startswith("Tally rejected ") or detail.startswith("Tally "):
         return detail
     return f"Local agent request failed: {detail}"
+
+
+def _agent_headers(agent: dict[str, Any]) -> dict[str, str]:
+    token = agent.get("auth_token")
+    return {"X-AccountPilot-Agent-Token": str(token)} if token else {}
+
+
+def _public_agent(agent: dict[str, Any]) -> dict[str, Any]:
+    return {key: value for key, value in agent.items() if key != "auth_token"}

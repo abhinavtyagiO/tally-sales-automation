@@ -3,17 +3,24 @@ from __future__ import annotations
 import logging
 from typing import Any
 
+from backend import config
 from backend.services import local_agent_service
-from backend.services.tally_client import TallyError
+from backend.services.connector_job_service import create_list_companies_job, get_tally_company_discovery_status
+from backend.services.connector_setup_service import get_helper_detection_status
+from backend.services.tally_client import TallyClient, TallyError
 
 
 logger = logging.getLogger(__name__)
 
 
 def get_tally_status(user_id: int) -> dict[str, Any]:
+    if config.CONNECTOR_MODE == "polling":
+        helper = get_helper_detection_status(user_id)
+        if helper["status"] == "connected":
+            return {"status": "connected", "detail": None, "message": "AccountPilot Helper is connected"}
+        return {"status": "disconnected", "detail": "connector_unavailable", "message": helper["message"]}
     try:
-        agent = local_agent_service.get_or_create_active_agent(user_id)
-        local_agent_service.dispatch_tally_operation(agent, "health_check", {})
+        TallyClient().ping()
     except TallyError as exc:
         detail = _classify_error(str(exc))
         logger.warning("tally.status.failed user_id=%s detail=%s error=%r", user_id, detail, exc)
@@ -26,9 +33,22 @@ def get_tally_status(user_id: int) -> dict[str, Any]:
 
 
 def list_tally_companies(user_id: int) -> dict[str, Any]:
+    if config.CONNECTOR_MODE == "polling":
+        status = get_tally_company_discovery_status(user_id)
+        if status["status"] == "not_requested":
+            try:
+                create_list_companies_job(user_id)
+            except Exception as exc:
+                logger.warning("tally.companies.polling_enqueue_failed user_id=%s error=%r", user_id, exc)
+            status = get_tally_company_discovery_status(user_id)
+        return {
+            "available": status["available"],
+            "companies": status["companies"],
+            "detail": status.get("detail"),
+            "message": status.get("message"),
+        }
     try:
-        agent = local_agent_service.get_or_create_active_agent(user_id)
-        response = local_agent_service.dispatch_tally_operation(agent, "list_companies", {})
+        companies = TallyClient().get_companies()
     except TallyError as exc:
         detail = _classify_error(str(exc))
         logger.warning("tally.companies.failed user_id=%s detail=%s error=%r", user_id, detail, exc)
@@ -38,16 +58,20 @@ def list_tally_companies(user_id: int) -> dict[str, Any]:
             "detail": detail,
             "message": "Company list is unavailable. You can type the Tally company name.",
         }
-    companies = sorted({str(name).strip() for name in response.get("companies", []) if str(name).strip()}, key=str.lower)
+    companies = sorted({str(name).strip() for name in companies if str(name).strip()}, key=str.lower)
     logger.info("tally.companies.success user_id=%s count=%s", user_id, len(companies))
     return {"available": bool(companies), "companies": companies, "detail": None, "message": None}
 
 
 def ensure_tally_reachable(user_id: int) -> dict[str, Any]:
-    agent = local_agent_service.get_or_create_active_agent(user_id)
-    local_agent_service.dispatch_tally_operation(agent, "health_check", {})
-    logger.info("tally.reachable user_id=%s agent_id=%s", user_id, agent.get("id"))
-    return agent
+    if config.CONNECTOR_MODE == "polling":
+        helper = get_helper_detection_status(user_id)
+        if helper["status"] == "connected" and helper.get("agent"):
+            return helper["agent"]
+        raise TallyError("AccountPilot Helper is not connected")
+    TallyClient().ping()
+    logger.info("tally.reachable user_id=%s mode=direct", user_id)
+    return {"id": None, "direct_tally": True, "base_url": config.TALLY_URL}
 
 
 def _classify_error(message: str) -> str:

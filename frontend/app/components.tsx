@@ -7,6 +7,8 @@ import {
   Building2,
   CheckCircle2,
   ChevronRight,
+  Copy,
+  Download,
   FileSpreadsheet,
   History,
   LogOut,
@@ -32,7 +34,7 @@ import {
   summarizePreview,
   tallyIsConnected,
 } from "./lib/derivations";
-import type { AppView, CommitSummary, Company, ImportPreview, ImportRecord, ImportRow, ImportType, StockItem, StockItemsResponse, TallyCompanies, TallyStatus, User } from "./lib/types";
+import type { AppView, CommitRun, CommitSummary, Company, HelperStatus, ImportPreview, ImportRecord, ImportRow, ImportType, StockItem, StockItemsResponse, TallyCompanies, TallyStatus, User } from "./lib/types";
 
 type ImportDetails = Record<number, ImportRow[]>;
 
@@ -197,7 +199,13 @@ export function SetupView({
   setSupplierState,
   tallyCompanies,
   tallyStatus,
+  helperStatus,
+  helperInstallCommand,
   addCompany,
+  startHelperSetup,
+  showHelperSetup,
+  helperDownloadConfigured,
+  refreshConnection,
   busy,
   existingCompanies,
   error,
@@ -210,7 +218,13 @@ export function SetupView({
   setSupplierState: (value: string) => void;
   tallyCompanies: TallyCompanies;
   tallyStatus: TallyStatus | null;
+  helperStatus: HelperStatus | null;
+  helperInstallCommand: string;
   addCompany: () => void;
+  startHelperSetup: () => void;
+  showHelperSetup: boolean;
+  helperDownloadConfigured: boolean;
+  refreshConnection: () => void;
   busy: boolean;
   existingCompanies: Company[];
   error: string;
@@ -230,6 +244,16 @@ export function SetupView({
         </div>
       </section>
       <section className="card form-card">
+        {showHelperSetup ? (
+          <HelperSetupPanel
+            status={helperStatus}
+            installCommand={helperInstallCommand}
+            busy={busy}
+            helperDownloadConfigured={helperDownloadConfigured}
+            startHelperSetup={startHelperSetup}
+            refreshConnection={refreshConnection}
+          />
+        ) : null}
         <TallyConnection status={tallyStatus} />
         <label className="field-label" htmlFor="company-name">
           Tally company
@@ -273,6 +297,67 @@ export function SetupView({
       </section>
     </div>
   );
+}
+
+function HelperSetupPanel({
+  status,
+  installCommand,
+  busy,
+  helperDownloadConfigured,
+  startHelperSetup,
+  refreshConnection,
+}: {
+  status: HelperStatus | null;
+  installCommand: string;
+  busy: boolean;
+  helperDownloadConfigured: boolean;
+  startHelperSetup: () => void;
+  refreshConnection: () => void;
+}) {
+  const [copied, setCopied] = useState(false);
+  const current = status?.status || "helper_required";
+  const connected = current === "connected";
+  const waiting = current === "waiting_for_helper";
+  async function copyInstallCommand() {
+    if (!installCommand) return;
+    await navigator.clipboard.writeText(installCommand);
+    setCopied(true);
+    window.setTimeout(() => setCopied(false), 1800);
+  }
+  return (
+    <div className={connected ? "helper-panel connected" : "helper-panel"}>
+      <StatusIcon connected={connected} />
+      <div>
+        <p className="eyebrow">AccountPilot Helper</p>
+        <h3>{connected ? "Helper connected" : waiting ? "Finish Helper setup" : "Install Helper on your Tally computer"}</h3>
+        <p>{status?.message || "Install AccountPilot Helper to connect with Tally."}</p>
+        {!connected && (
+          <div className="helper-actions">
+            <button className="primary-button" onClick={startHelperSetup} disabled={busy || !helperDownloadConfigured}>
+              <DownloadIcon /> Download for Windows
+            </button>
+            <button className="ghost-button" onClick={refreshConnection} disabled={busy}>
+              <RefreshCw size={16} /> Check again
+            </button>
+          </div>
+        )}
+        {installCommand && !connected && (
+          <div className="helper-command">
+            <p className="muted">Run this in PowerShell after the download finishes.</p>
+            <code>{installCommand}</code>
+            <button className="ghost-button" onClick={copyInstallCommand} disabled={busy}>
+              {copied ? <CheckCircle2 size={16} /> : <Copy size={16} />} {copied ? "Copied" : "Copy command"}
+            </button>
+          </div>
+        )}
+        {!helperDownloadConfigured && !connected && <p className="muted">Helper download is not configured for this environment.</p>}
+      </div>
+    </div>
+  );
+}
+
+function DownloadIcon() {
+  return <Download size={16} />;
 }
 
 export function DashboardView({
@@ -540,6 +625,7 @@ export function UploadView({
 export function PreviewCommitView({
   preview,
   tallyStatus,
+  commitRun,
   busy,
   commitRows,
   setActiveView,
@@ -547,6 +633,7 @@ export function PreviewCommitView({
 }: {
   preview: ImportPreview;
   tallyStatus: TallyStatus | null;
+  commitRun: CommitRun | null;
   busy: boolean;
   commitRows: () => void;
   setActiveView: (view: AppView) => void;
@@ -580,6 +667,11 @@ export function PreviewCommitView({
           <button className="primary-button wide-button" onClick={commitRows} disabled={busy || !connected || summary.validRows === 0}>
             {busy ? "Committing..." : `Commit ${summary.validRows} valid row${summary.validRows === 1 ? "" : "s"}`}
           </button>
+          {commitRun && (
+            <p className="muted">
+              {commitRun.status === "queued" ? "Queued" : commitRun.status === "processing" ? "Creating vouchers" : "Finalizing"}: {commitRun.success_count} succeeded, {commitRun.failed_count} failed
+            </p>
+          )}
           {!connected && <p className="muted">Open Tally and refresh the connection before committing.</p>}
         </section>
       </section>

@@ -5,13 +5,26 @@ import logging
 import sqlite3
 from typing import Any, Optional
 
-from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, Response, UploadFile
+from fastapi import APIRouter, BackgroundTasks, Depends, File, Form, Header, HTTPException, Request, Response, UploadFile
 from pydantic import BaseModel, Field
 
 from backend import config
 from backend.db import database
 from backend.services import auth_service, local_agent_service
 from backend.services.company_service import company_has_online_agent, require_company
+from backend.services.connector_job_service import (
+    create_list_companies_job,
+    create_master_sync_jobs,
+    create_tally_health_job,
+    create_validate_company_job,
+    get_company_tally_health_status,
+    get_master_sync_status,
+    get_tally_company_discovery_status,
+    get_validate_company_status,
+    poll_connector_job,
+    submit_connector_job_result,
+)
+from backend.services.connector_setup_service import create_setup_session, get_helper_detection_status, get_helper_diagnostics, register_helper
 from backend.services.excel_parser import ExcelParseError, parse_excel
 from backend.services.gst_invoice import (
     IMPORT_TYPE_GST,
@@ -101,6 +114,27 @@ class PairAgentRequest(BaseModel):
 class HeartbeatRequest(BaseModel):
     agent_id: int
     base_url: Optional[str] = None
+
+
+class ConnectorPollRequest(BaseModel):
+    agent_id: int
+
+
+class ConnectorJobResultRequest(BaseModel):
+    agent_id: int
+    status: str
+    result: dict[str, Any] = Field(default_factory=dict)
+    error_message: Optional[str] = None
+
+
+class ConnectorRegisterRequest(BaseModel):
+    setup_token: str
+    device_name: Optional[str] = None
+
+
+class ConnectorValidateCompanyRequest(BaseModel):
+    company_name: str
+    tally_url: str = config.TALLY_URL
 
 
 class SaleRow(BaseModel):
@@ -269,6 +303,78 @@ def heartbeat_agent(request: HeartbeatRequest) -> dict[str, Any]:
     return {"agent": agent}
 
 
+@router.post("/connector/poll")
+def connector_poll(
+    request: ConnectorPollRequest,
+    x_accountpilot_agent_token: Optional[str] = Header(default=None),
+) -> dict[str, Any]:
+    return poll_connector_job(request.agent_id, x_accountpilot_agent_token)
+
+
+@router.post("/connector/setup-session")
+def connector_setup_session(user: dict[str, Any] = Depends(auth_service.get_current_user)) -> dict[str, Any]:
+    return create_setup_session(user["id"])
+
+
+@router.get("/connector/status")
+def helper_detection_status(user: dict[str, Any] = Depends(auth_service.get_current_user)) -> dict[str, Any]:
+    return get_helper_detection_status(user["id"])
+
+
+@router.get("/connector/diagnostics")
+def helper_diagnostics(user: dict[str, Any] = Depends(auth_service.get_current_user)) -> dict[str, Any]:
+    return get_helper_diagnostics(user["id"])
+
+
+@router.post("/connector/tally-companies/check")
+def create_tally_companies_check(user: dict[str, Any] = Depends(auth_service.get_current_user)) -> dict[str, Any]:
+    job = create_list_companies_job(user["id"])
+    return {"job": job, "companies": get_tally_company_discovery_status(user["id"])}
+
+
+@router.get("/connector/tally-companies")
+def connector_tally_companies(user: dict[str, Any] = Depends(auth_service.get_current_user)) -> dict[str, Any]:
+    return get_tally_company_discovery_status(user["id"])
+
+
+@router.post("/connector/company-validation")
+def create_connector_company_validation(
+    request: ConnectorValidateCompanyRequest,
+    user: dict[str, Any] = Depends(auth_service.get_current_user),
+) -> dict[str, Any]:
+    company_name = request.company_name.strip()
+    if not company_name:
+        raise HTTPException(status_code=400, detail="Company name is required")
+    job = create_validate_company_job(user["id"], company_name, request.tally_url)
+    return {"job": job, "validation": get_validate_company_status(user["id"], job["id"])}
+
+
+@router.get("/connector/company-validation/{job_id}")
+def connector_company_validation(job_id: int, user: dict[str, Any] = Depends(auth_service.get_current_user)) -> dict[str, Any]:
+    return get_validate_company_status(user["id"], job_id)
+
+
+@router.post("/connector/register")
+def connector_register(request: ConnectorRegisterRequest) -> dict[str, Any]:
+    return register_helper(request.setup_token, request.device_name)
+
+
+@router.post("/connector/jobs/{job_id}/result")
+def connector_job_result(
+    job_id: int,
+    request: ConnectorJobResultRequest,
+    x_accountpilot_agent_token: Optional[str] = Header(default=None),
+) -> dict[str, Any]:
+    return submit_connector_job_result(
+        request.agent_id,
+        x_accountpilot_agent_token,
+        job_id,
+        request.status,
+        request.result,
+        request.error_message,
+    )
+
+
 @router.post("/companies/{company_id}/agents/{agent_id}/revoke")
 def revoke_agent(
     company_id: int,
@@ -279,6 +385,31 @@ def revoke_agent(
     if not database.revoke_local_agent(agent_id, user["id"]):
         raise HTTPException(status_code=404, detail="Local agent not found")
     return {"status": "revoked"}
+
+
+@router.post("/companies/{company_id}/connector/health-check")
+def create_connector_health_check(company_id: int, user: dict[str, Any] = Depends(auth_service.get_current_user)) -> dict[str, Any]:
+    company = require_company(user["id"], company_id)
+    job = create_tally_health_job(user["id"], company)
+    return {"job": job, "status": get_company_tally_health_status(company_id)}
+
+
+@router.get("/companies/{company_id}/connector/status")
+def connector_status(company_id: int, user: dict[str, Any] = Depends(auth_service.get_current_user)) -> dict[str, Any]:
+    require_company(user["id"], company_id)
+    return get_company_tally_health_status(company_id)
+
+
+@router.post("/companies/{company_id}/connector/sync")
+def create_connector_master_sync(company_id: int, user: dict[str, Any] = Depends(auth_service.get_current_user)) -> dict[str, Any]:
+    company = require_company(user["id"], company_id)
+    return create_master_sync_jobs(user["id"], company)
+
+
+@router.get("/companies/{company_id}/connector/sync")
+def connector_master_sync_status(company_id: int, user: dict[str, Any] = Depends(auth_service.get_current_user)) -> dict[str, Any]:
+    require_company(user["id"], company_id)
+    return get_master_sync_status(company_id)
 
 
 @router.post("/companies/{company_id}/sync")
@@ -397,7 +528,7 @@ def commit_import(
         try:
             if not is_gst:
                 validate_voucher(voucher)
-            response = local_agent_service.dispatch_tally_operation(
+            response = _dispatch_tally_operation(
                 agent,
                 "create_sales_voucher",
                 {"voucher": voucher, "company_name": company["company_name"], "tally_url": company["tally_url"]},
@@ -431,6 +562,55 @@ def commit_import(
         "success_count": sum(1 for item in results if item["status"] == "success"),
         "failed_count": sum(1 for item in results if item["status"] == "failed"),
     }
+
+
+@router.post("/companies/{company_id}/imports/{import_id}/commit-runs")
+def start_commit_run(
+    company_id: int,
+    import_id: int,
+    request: CommitRequest,
+    background_tasks: BackgroundTasks,
+    user: dict[str, Any] = Depends(auth_service.get_current_user),
+) -> dict[str, Any]:
+    require_company(user["id"], company_id)
+    import_record = database.get_import(import_id, user["id"], company_id)
+    if not import_record:
+        raise HTTPException(status_code=404, detail="Import not found")
+    active_run = database.get_active_commit_run(user["id"], company_id, import_id)
+    if active_run:
+        return {"commit_run": _public_commit_run(active_run)}
+    total_count = sum(
+        1
+        for row in database.list_import_rows(import_id, company_id)
+        if row["validation_status"] == "valid"
+        and row["commit_status"] != "success"
+        and (not request.import_row_ids or row["id"] in request.import_row_ids)
+    )
+    run = database.create_commit_run(user["id"], company_id, import_id, total_count=total_count)
+    if config.CONNECTOR_MODE == "polling":
+        _enqueue_polling_commit_run(run["id"], company_id, import_id, request, user)
+        run = database.get_commit_run(run["id"], user["id"], company_id)
+        return {"commit_run": _public_commit_run(run)}
+    if background_tasks is None:
+        _complete_commit_run(run["id"], company_id, import_id, request, user)
+        run = database.get_commit_run(run["id"], user["id"], company_id)
+    else:
+        background_tasks.add_task(_complete_commit_run, run["id"], company_id, import_id, request, dict(user))
+    return {"commit_run": _public_commit_run(run)}
+
+
+@router.get("/companies/{company_id}/imports/{import_id}/commit-runs/{run_id}")
+def get_commit_run(
+    company_id: int,
+    import_id: int,
+    run_id: int,
+    user: dict[str, Any] = Depends(auth_service.get_current_user),
+) -> dict[str, Any]:
+    require_company(user["id"], company_id)
+    run = database.get_commit_run(run_id, user["id"], company_id)
+    if not run or int(run["import_id"]) != import_id:
+        raise HTTPException(status_code=404, detail="Commit run not found")
+    return {"commit_run": _public_commit_run(run)}
 
 
 @router.get("/companies/{company_id}/imports")
@@ -611,6 +791,98 @@ def _process_import_rows(company: dict[str, Any], import_id: int, user: dict[str
     }
 
 
+def _complete_commit_run(run_id: int, company_id: int, import_id: int, request: CommitRequest, user: dict[str, Any]) -> None:
+    database.update_commit_run_status(run_id, "processing")
+    try:
+        summary = commit_import(company_id, import_id, request, user=user)
+        database.complete_commit_run(run_id, summary)
+    except HTTPException as exc:
+        database.fail_commit_run(run_id, str(exc.detail))
+    except Exception as exc:
+        logger.exception("commit_run.failed run_id=%s company_id=%s import_id=%s", run_id, company_id, import_id)
+        database.fail_commit_run(run_id, str(exc))
+
+
+def _enqueue_polling_commit_run(run_id: int, company_id: int, import_id: int, request: CommitRequest, user: dict[str, Any]) -> None:
+    company = require_company(user["id"], company_id)
+    agent_id = company.get("local_agent_id")
+    if not agent_id:
+        database.fail_commit_run(run_id, "AccountPilot Helper is not connected")
+        return
+    agent = database.get_local_agent(int(agent_id), user_id=user["id"])
+    if not agent or agent.get("pairing_status") != "paired":
+        database.fail_commit_run(run_id, "AccountPilot Helper is not connected")
+        return
+    import_record = database.get_import(import_id, user["id"], company_id)
+    if not import_record:
+        database.fail_commit_run(run_id, "Import not found")
+        return
+    rows = [
+        row
+        for row in database.list_import_rows(import_id, company_id)
+        if row["validation_status"] == "valid"
+        and row["commit_status"] != "success"
+        and (not request.import_row_ids or row["id"] in request.import_row_ids)
+    ]
+    database.update_commit_run_status(run_id, "processing", total_count=len(rows))
+    try:
+        is_gst = normalize_import_type(import_record.get("import_type")) == IMPORT_TYPE_GST
+        if is_gst:
+            result = build_gst_invoices([_row_to_gst(row) for row in rows], company=company, user_id=user["id"])
+        else:
+            result = build_vouchers([_row_to_sale(row) for row in rows], ensure_ledgers=False, company=company, user_id=user["id"])
+        for voucher in result.vouchers:
+            if not is_gst:
+                validate_voucher(voucher)
+            source = voucher.get("Source") or {}
+            fingerprint = source.get("source_fingerprint")
+            import_row_id = source.get("import_row_id")
+            if fingerprint and database.successful_fingerprint_exists(str(fingerprint), company_id=company_id):
+                if import_row_id:
+                    database.update_import_row_commit(int(import_row_id), "success", None, {"status": "already_committed"})
+                continue
+            database.create_connector_job(
+                user_id=user["id"],
+                company_id=company_id,
+                agent_id=int(agent["id"]),
+                operation="create_sales_voucher",
+                payload={
+                    "voucher": voucher,
+                    "company_name": company["company_name"],
+                    "tally_url": company["tally_url"],
+                    "idempotency_key": fingerprint,
+                },
+                commit_run_id=run_id,
+            )
+        for error in result.errors:
+            row = rows[error["row"]]
+            database.update_import_row_commit(row["id"], "failed", error["error"])
+        database.refresh_commit_run_from_rows(run_id)
+    except Exception as exc:
+        logger.exception("commit_run.enqueue_failed run_id=%s company_id=%s import_id=%s", run_id, company_id, import_id)
+        database.fail_commit_run(run_id, str(exc))
+
+
+def _public_commit_run(run: dict[str, Any] | None) -> dict[str, Any] | None:
+    if not run:
+        return None
+    result = run.get("result") or {}
+    return {
+        "id": run["id"],
+        "company_id": run["company_id"],
+        "import_id": run["import_id"],
+        "status": run["status"],
+        "total_count": run["total_count"],
+        "success_count": run["success_count"],
+        "failed_count": run["failed_count"],
+        "error_message": run.get("error_message"),
+        "result": result,
+        "created_at": run["created_at"],
+        "updated_at": run["updated_at"],
+        "completed_at": run.get("completed_at"),
+    }
+
+
 def _ensure_company_commit_ledgers(company: dict[str, Any], agent: dict[str, Any], rows: list[dict[str, Any]]) -> None:
     for ledger in required_ledgers_for_rows([_row_to_sale(row) for row in rows], company):
         ledger_name = ledger["ledger_name"]
@@ -618,7 +890,7 @@ def _ensure_company_commit_ledgers(company: dict[str, Any], agent: dict[str, Any
         if database.get_ledger_by_name(ledger_name, company_id=company["id"]):
             continue
         logger.info("import.commit.create_missing_ledger company_id=%s ledger_name=%s group_name=%s", company["id"], ledger_name, group_name)
-        local_agent_service.dispatch_tally_operation(
+        _dispatch_tally_operation(
             agent,
             "create_ledger",
             {
@@ -638,7 +910,7 @@ def _ensure_company_gst_commit_ledgers(company: dict[str, Any], agent: dict[str,
         if database.get_ledger_by_name(ledger_name, company_id=company["id"]):
             continue
         logger.info("import.commit.create_missing_gst_ledger company_id=%s ledger_name=%s group_name=%s", company["id"], ledger_name, group_name)
-        local_agent_service.dispatch_tally_operation(
+        _dispatch_tally_operation(
             agent,
             "create_ledger",
             {
@@ -655,6 +927,32 @@ def _active_company_id(companies: list[dict[str, Any]]) -> int | None:
     selected = next((company for company in companies if company.get("last_selected_at")), None)
     selected = selected or (companies[0] if companies else None)
     return selected["id"] if selected else None
+
+
+def _dispatch_tally_operation(agent: dict[str, Any], operation: str, payload: dict[str, Any]) -> dict[str, Any]:
+    if not agent.get("direct_tally"):
+        return local_agent_service.dispatch_tally_operation(agent, operation, payload)
+
+    tally = TallyClient(str(payload.get("tally_url") or agent.get("base_url") or config.TALLY_URL))
+    company_name = payload.get("company_name")
+    if operation == "health_check":
+        tally.ping()
+        return {"status": "connected"}
+    if operation == "list_companies":
+        return {"companies": tally.get_companies()}
+    if operation == "export_collection":
+        collection_id = str(payload["collection_id"])
+        current_company = str(company_name) if company_name else None
+        if collection_id.lower() == "ledger":
+            return {"ledgers": tally.get_all_ledgers(current_company)}
+        if collection_id.lower() == "stockitem":
+            return {"stock_items": tally.get_all_stock_items(current_company)}
+        return tally.export_collection(collection_id, current_company or "")
+    if operation == "create_ledger":
+        return tally.create_ledger(str(payload["name"]), str(payload["group_name"]), company_name=str(company_name) if company_name else None)
+    if operation == "create_sales_voucher":
+        return tally.create_sales_voucher(payload["voucher"], company_name=str(company_name) if company_name else None)
+    raise TallyError(f"Unsupported direct Tally operation: {operation}")
 
 
 def _active_tally_agent(user_id: int) -> dict[str, Any]:
@@ -702,7 +1000,7 @@ def _ensure_local_agent(user_id: int, base_url: str) -> dict[str, Any]:
 
 def _validate_company_in_tally(agent: dict[str, Any], company_name: str, tally_url: str) -> None:
     try:
-        result = local_agent_service.dispatch_tally_operation(
+        result = _dispatch_tally_operation(
             agent,
             "export_collection",
             {"collection_id": "Ledger", "company_name": company_name, "tally_url": tally_url},
