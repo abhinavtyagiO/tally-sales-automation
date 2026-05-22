@@ -12,6 +12,7 @@ __pycache__/
 backend/tally_sales.db
 node_modules/
 .next/
+frontend/out/
 .pnpm-store/
 .agents/
 issues-to-create.md
