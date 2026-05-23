@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
+import logging
 from typing import Any
 
 from fastapi import HTTPException
 
 from backend.db import database
 
+
+logger = logging.getLogger(__name__)
 
 HEALTH_CHECK_OPERATION = "health_check"
 LIST_COMPANIES_OPERATION = "list_companies"
@@ -23,7 +26,7 @@ def create_tally_health_job(user_id: int, company: dict[str, Any]) -> dict[str, 
     agent = database.get_local_agent(int(agent_id), user_id=user_id)
     if not agent or agent.get("revoked_at"):
         raise HTTPException(status_code=503, detail="AccountPilot Helper is not connected")
-    return database.create_connector_job(
+    job = database.create_connector_job(
         user_id=user_id,
         company_id=int(company["id"]),
         agent_id=int(agent["id"]),
@@ -33,28 +36,34 @@ def create_tally_health_job(user_id: int, company: dict[str, Any]) -> dict[str, 
             "tally_url": company["tally_url"],
         },
     )
+    logger.info("connector.job.created operation=%s user_id=%s company_id=%s agent_id=%s job_id=%s", HEALTH_CHECK_OPERATION, user_id, company["id"], agent["id"], job["id"])
+    return job
 
 
 def create_list_companies_job(user_id: int) -> dict[str, Any]:
     agent = _latest_connected_agent(user_id)
-    return database.create_connector_job(
+    job = database.create_connector_job(
         user_id=user_id,
         company_id=None,
         agent_id=int(agent["id"]),
         operation=LIST_COMPANIES_OPERATION,
         payload={},
     )
+    logger.info("connector.job.created operation=%s user_id=%s agent_id=%s job_id=%s", LIST_COMPANIES_OPERATION, user_id, agent["id"], job["id"])
+    return job
 
 
 def create_validate_company_job(user_id: int, company_name: str, tally_url: str) -> dict[str, Any]:
     agent = _latest_connected_agent(user_id)
-    return database.create_connector_job(
+    job = database.create_connector_job(
         user_id=user_id,
         company_id=None,
         agent_id=int(agent["id"]),
         operation=VALIDATE_COMPANY_OPERATION,
         payload={"company_name": company_name, "tally_url": tally_url},
     )
+    logger.info("connector.job.created operation=%s user_id=%s agent_id=%s job_id=%s company_name=%s", VALIDATE_COMPANY_OPERATION, user_id, agent["id"], job["id"], company_name)
+    return job
 
 
 def create_master_sync_jobs(user_id: int, company: dict[str, Any]) -> dict[str, Any]:
@@ -82,6 +91,14 @@ def create_master_sync_jobs(user_id: int, company: dict[str, Any]) -> dict[str, 
             "tally_url": company["tally_url"],
         },
     )
+    logger.info(
+        "connector.jobs.created operation=master_sync user_id=%s company_id=%s agent_id=%s job_ids=%s,%s",
+        user_id,
+        company["id"],
+        agent["id"],
+        ledgers_job["id"],
+        stock_job["id"],
+    )
     return {"jobs": [ledgers_job, stock_job], "status": get_master_sync_status(int(company["id"]))}
 
 
@@ -102,6 +119,8 @@ def poll_connector_job(agent_id: int, token: str | None) -> dict[str, Any]:
     database.heartbeat_local_agent(int(agent["id"]), user_id=int(agent["user_id"]))
     lease_expires_at = (datetime.now(timezone.utc) + timedelta(seconds=LEASE_SECONDS)).isoformat()
     job = database.lease_next_connector_job(int(agent["id"]), lease_expires_at)
+    if job:
+        logger.info("connector.job.leased agent_id=%s job_id=%s operation=%s company_id=%s", agent["id"], job["id"], job["operation"], job.get("company_id"))
     return {"job": _public_job(job) if job else None}
 
 
@@ -115,6 +134,7 @@ def submit_connector_job_result(agent_id: int, token: str | None, job_id: int, s
         raise HTTPException(status_code=400, detail="Unsupported connector job result status")
     if not job:
         raise HTTPException(status_code=404, detail="Connector job not found")
+    logger.info("connector.job.result agent_id=%s job_id=%s operation=%s status=%s company_id=%s", agent["id"], job["id"], job["operation"], status, job.get("company_id"))
     database.update_local_agent_activity(int(agent["id"]), None if status == "success" else error_message)
     _apply_job_result(job)
     return {"job": _public_job(job)}

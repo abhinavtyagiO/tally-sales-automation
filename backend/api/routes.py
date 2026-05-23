@@ -205,23 +205,33 @@ def create_company(request: CompanyRequest, user: dict[str, Any] = Depends(auth_
     if any(company["company_name"].lower() == company_name.lower() for company in database.list_companies(user["id"])):
         raise HTTPException(status_code=409, detail="This company is already added")
 
-    agent = _active_tally_agent(user["id"])
-    _validate_company_in_tally(agent, company_name, request.tally_url)
-
     try:
+        agent = _active_tally_agent(user["id"])
         data = _model_to_dict(request)
         data["company_name"] = company_name
         data["tally_url"] = request.tally_url
         data["supplier_gstin"] = supplier_gstin
         data["supplier_state"] = supplier_state
         data["local_agent_id"] = agent["id"]
+        if config.CONNECTOR_MODE != "polling":
+            _validate_company_in_tally(agent, company_name, request.tally_url)
         company = database.create_company(user["id"], data)
         selected = database.select_company(company["id"], user["id"])
-        try:
-            sync_result = sync_from_tally(company=selected, agent=agent)
-        except TallyError:
-            database.delete_company(company["id"], user["id"])
-            raise
+        if config.CONNECTOR_MODE == "polling":
+            sync_result = create_master_sync_jobs(user["id"], selected)
+            logger.info(
+                "company.create.polling_sync_queued user_id=%s company_id=%s agent_id=%s job_count=%s",
+                user["id"],
+                company["id"],
+                agent["id"],
+                len(sync_result.get("jobs") or []),
+            )
+        else:
+            try:
+                sync_result = sync_from_tally(company=selected, agent=agent)
+            except TallyError:
+                database.delete_company(company["id"], user["id"])
+                raise
         company = database.get_company(company["id"], user_id=user["id"])
         logger.info("company.create.success user_id=%s company_id=%s company_name=%s", user["id"], company["id"], company_name)
     except sqlite3.IntegrityError as exc:
@@ -230,6 +240,8 @@ def create_company(request: CompanyRequest, user: dict[str, Any] = Depends(auth_
     except TallyError as exc:
         logger.warning("company.create.failed user_id=%s company_name=%s error=%r", user["id"], company_name, exc)
         raise _friendly_tally_exception(exc) from exc
+    except HTTPException:
+        raise
     except Exception as exc:
         logger.exception("company.create.failed user_id=%s company_name=%s", user["id"], company_name)
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -415,6 +427,16 @@ def connector_master_sync_status(company_id: int, user: dict[str, Any] = Depends
 def company_sync(company_id: int, user: dict[str, Any] = Depends(auth_service.get_current_user)) -> dict[str, Any]:
     company = require_company(user["id"], company_id)
     agent = company_has_online_agent(company)
+    if config.CONNECTOR_MODE == "polling":
+        sync_result = create_master_sync_jobs(user["id"], company)
+        logger.info(
+            "company.sync.polling_sync_queued user_id=%s company_id=%s agent_id=%s job_count=%s",
+            user["id"],
+            company_id,
+            agent["id"],
+            len(sync_result.get("jobs") or []),
+        )
+        return sync_result
     try:
         return sync_from_tally(company=company, agent=agent)
     except TallyError as exc:
@@ -457,14 +479,33 @@ async def upload_company_excel(
 ) -> dict[str, Any]:
     company = require_company(user["id"], company_id)
     normalized_import_type = _normalize_import_type_or_400(import_type)
-    agent = _active_tally_agent(user["id"])
-    try:
-        logger.info("import.upload.sync_start user_id=%s company_id=%s filename=%s", user["id"], company_id, file.filename)
-        sync_result = sync_from_tally(company=company, agent=agent)
-    except TallyError as exc:
-        logger.warning("import.upload.sync_failed user_id=%s company_id=%s filename=%s error=%r", user["id"], company_id, file.filename, exc)
-        raise _friendly_tally_exception(exc) from exc
-    company = database.get_company(company_id, user_id=user["id"])
+    if config.CONNECTOR_MODE == "polling":
+        company_has_online_agent(company)
+        sync_result = get_master_sync_status(company_id)
+        if sync_result["status"] == "not_requested" and company.get("last_sync_status") == "success":
+            sync_result = {"status": "completed", "message": "Tally masters synced from cache.", "jobs": []}
+        elif sync_result["status"] == "not_requested":
+            sync_result = create_master_sync_jobs(user["id"], company)
+        sync_status = sync_result.get("status")
+        sync_state = sync_status.get("status") if isinstance(sync_status, dict) else sync_status
+        if sync_state != "completed":
+            logger.warning(
+                "import.upload.blocked_pending_sync user_id=%s company_id=%s filename=%s sync_status=%s",
+                user["id"],
+                company_id,
+                file.filename,
+                sync_state,
+            )
+            raise HTTPException(status_code=409, detail="Tally master sync is still running. Please try again in a few seconds.")
+    else:
+        agent = _active_tally_agent(user["id"])
+        try:
+            logger.info("import.upload.sync_start user_id=%s company_id=%s filename=%s", user["id"], company_id, file.filename)
+            sync_result = sync_from_tally(company=company, agent=agent)
+        except TallyError as exc:
+            logger.warning("import.upload.sync_failed user_id=%s company_id=%s filename=%s error=%r", user["id"], company_id, file.filename, exc)
+            raise _friendly_tally_exception(exc) from exc
+        company = database.get_company(company_id, user_id=user["id"])
     rows = await _parse_upload(file, normalized_import_type)
     import_record = database.create_import(user["id"], company_id, file.filename, rows, import_type=normalized_import_type)
     try:
@@ -496,6 +537,9 @@ def commit_import(
     request: CommitRequest,
     user: dict[str, Any] = Depends(auth_service.get_current_user),
 ) -> dict[str, Any]:
+    if config.CONNECTOR_MODE == "polling":
+        logger.warning("import.commit.blocked_in_polling_mode user_id=%s company_id=%s import_id=%s", user["id"], company_id, import_id)
+        raise HTTPException(status_code=409, detail="Use the commit run endpoint when AccountPilot Helper is connected.")
     company = require_company(user["id"], company_id)
     agent = company_has_online_agent(company)
     try:

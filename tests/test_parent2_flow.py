@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from io import BytesIO
 from pathlib import Path
 import tempfile
@@ -13,7 +14,7 @@ from backend import config
 from backend.api import routes
 from backend.db import database
 from backend.services import auth_service, local_agent_service
-from backend.services.gst_invoice import IMPORT_TYPE_GST
+from backend.services.gst_invoice import IMPORT_TYPE_GST, IMPORT_TYPE_RETAIL
 from backend.services.sync_service import sync_from_tally
 from backend.services.tally_client import TallyError
 
@@ -349,6 +350,58 @@ class Parent2FlowTests(unittest.TestCase):
             x_accountpilot_agent_token=registered["agent_auth_token"],
         )
         self.assertEqual(polled["job"]["operation"], "list_companies")
+
+    def test_polling_create_company_enqueues_master_sync_without_local_dispatch(self) -> None:
+        original_mode = config.CONNECTOR_MODE
+        config.CONNECTOR_MODE = "polling"
+        self.addCleanup(lambda: setattr(config, "CONNECTOR_MODE", original_mode))
+        setup = routes.connector_setup_session(user=self.user)
+        registered = routes.connector_register(routes.ConnectorRegisterRequest(setup_token=setup["setup_token"]))
+
+        with patch("backend.services.local_agent_service.dispatch_tally_operation") as dispatch:
+            created = routes.create_company(self.company_request(), user=self.user)
+
+        dispatch.assert_not_called()
+        self.assertEqual(created["company"]["company_name"], "Bhrama Enterprises")
+        self.assertEqual(created["company"]["local_agent_id"], registered["agent"]["id"])
+        self.assertEqual(created["sync"]["status"]["status"], "syncing")
+
+        first_job = routes.connector_poll(
+            routes.ConnectorPollRequest(agent_id=registered["agent"]["id"]),
+            x_accountpilot_agent_token=registered["agent_auth_token"],
+        )["job"]
+        self.assertIn(first_job["operation"], {"sync_ledgers", "sync_stock_items"})
+
+    def test_polling_upload_uses_cached_masters_without_local_dispatch(self) -> None:
+        original_mode = config.CONNECTOR_MODE
+        config.CONNECTOR_MODE = "polling"
+        self.addCleanup(lambda: setattr(config, "CONNECTOR_MODE", original_mode))
+        company = self.make_company()
+        agent = self.make_token_agent()
+        database.update_company(company["id"], self.user["id"], {"local_agent_id": agent["id"]})
+        self.seed_company_masters(company)
+
+        buffer = BytesIO()
+        pd.DataFrame(
+            [
+                {
+                    "product_name": "2.75-18 NGP",
+                    "price": 1600,
+                    "payment_mode": "Cash",
+                    "voucher_date": "2026-05-04",
+                }
+            ]
+        ).to_excel(buffer, index=False)
+        upload = routes.UploadFile(filename="sales.xlsx", file=BytesIO(buffer.getvalue()))
+
+        with patch("backend.services.local_agent_service.dispatch_tally_operation") as dispatch:
+            imported = asyncio.run(
+                routes.upload_company_excel(company["id"], file=upload, import_type=IMPORT_TYPE_RETAIL, user=self.user)
+            )
+
+        dispatch.assert_not_called()
+        self.assertEqual(imported["count"], 1)
+        self.assertEqual(imported["sync"]["status"], "completed")
 
     def test_local_agent_pairing_heartbeat_and_revocation(self) -> None:
         company = self.make_company()
