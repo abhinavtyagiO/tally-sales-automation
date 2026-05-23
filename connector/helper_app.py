@@ -48,8 +48,8 @@ class HelperApp:
             try:
                 if not self.connector:
                     return
-                ran_job = self.connector.run_once()
-                if ran_job:
+                job_count = self.connector.run_until_idle()
+                if job_count:
                     self._set_status("AccountPilot connected", "")
                     self.root.after(0, self.last_activity_var.set, f"Last activity: {time.strftime('%I:%M %p')}")
                 else:

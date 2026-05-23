@@ -32,6 +32,19 @@ class FakeTransport:
         return FakeResponse({"status": "ok"})
 
 
+class FakeQueueTransport:
+    def __init__(self, jobs: list[dict]) -> None:
+        self.jobs = list(jobs)
+        self.posts: list[dict] = []
+
+    def post(self, url: str, **kwargs):
+        self.posts.append({"url": url, **kwargs})
+        if url.endswith("/connector/poll"):
+            job = self.jobs.pop(0) if self.jobs else None
+            return FakeResponse({"job": job})
+        return FakeResponse({"status": "ok"})
+
+
 class FakeRegistrationTransport:
     def __init__(self) -> None:
         self.posts: list[dict] = []
@@ -88,6 +101,24 @@ class ConnectorRuntimeTests(unittest.TestCase):
 
         self.assertFalse(connector.run_once())
         self.assertEqual(len(transport.posts), 1)
+
+    def test_run_until_idle_drains_available_jobs_before_returning(self) -> None:
+        transport = FakeQueueTransport(
+            [
+                {"id": 1, "operation": "health_check", "payload": {}},
+                {"id": 2, "operation": "health_check", "payload": {}},
+                {"id": 3, "operation": "health_check", "payload": {}},
+            ]
+        )
+        connector = FakeConnector(self.settings(), transport)
+
+        self.assertEqual(connector.run_until_idle(), 3)
+
+        poll_requests = [post for post in transport.posts if post["url"].endswith("/connector/poll")]
+        result_requests = [post for post in transport.posts if "/connector/jobs/" in post["url"]]
+        self.assertEqual(len(poll_requests), 4)
+        self.assertEqual(len(result_requests), 3)
+        self.assertEqual([post["json"]["status"] for post in result_requests], ["success", "success", "success"])
 
     def test_register_with_setup_token_persists_connector_config(self) -> None:
         transport = FakeRegistrationTransport()
