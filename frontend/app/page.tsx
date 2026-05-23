@@ -374,8 +374,9 @@ export default function Home() {
           supplier_state: state,
         }),
       });
-      await loadCompanies();
       setActiveCompanyId(data.company.id);
+      if (HELPER_SETUP_ENABLED) await waitForMasterSync(data.company.id);
+      await loadCompanies();
       setCompanyName("");
       setSupplierGstin("");
       setSupplierState("");
@@ -387,6 +388,17 @@ export default function Home() {
     } finally {
       setBusy(false);
     }
+  }
+
+  async function waitForMasterSync(companyId: number) {
+    for (let attempt = 0; attempt < 30; attempt += 1) {
+      const data = await api(`/companies/${companyId}/connector/sync`);
+      const status = data?.status?.status || data?.status;
+      if (status === "completed") return;
+      if (status === "failed") throw new Error(data?.status?.message || data?.message || "Tally master sync failed");
+      await new Promise((resolve) => window.setTimeout(resolve, 1000));
+    }
+    throw new Error("Tally master sync is still running. Please try again in a few seconds.");
   }
 
   async function selectCompany(companyId: number) {
