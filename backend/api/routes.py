@@ -872,8 +872,18 @@ def _enqueue_polling_commit_run(run_id: int, company_id: int, import_id: int, re
         is_gst = normalize_import_type(import_record.get("import_type")) == IMPORT_TYPE_GST
         if is_gst:
             result = build_gst_invoices([_row_to_gst(row) for row in rows], company=company, user_id=user["id"])
+            required_ledgers = required_gst_ledgers_for_rows([_row_to_gst(row) for row in rows], company)
         else:
             result = build_vouchers([_row_to_sale(row) for row in rows], ensure_ledgers=False, company=company, user_id=user["id"])
+            required_ledgers = required_ledgers_for_rows([_row_to_sale(row) for row in rows], company)
+        missing_ledger_job_ids = _enqueue_missing_ledger_jobs(
+            user_id=user["id"],
+            company=company,
+            agent_id=int(agent["id"]),
+            required_ledgers=required_ledgers,
+            commit_run_id=run_id,
+        )
+        rows_by_id = {int(row["id"]): row for row in rows}
         for voucher in result.vouchers:
             if not is_gst:
                 validate_voucher(voucher)
@@ -884,6 +894,11 @@ def _enqueue_polling_commit_run(run_id: int, company_id: int, import_id: int, re
                 if import_row_id:
                     database.update_import_row_commit(int(import_row_id), "success", None, {"status": "already_committed"})
                 continue
+            voucher_required_ledgers = _required_ledgers_for_voucher_row(
+                rows_by_id.get(int(import_row_id)) if import_row_id else None,
+                company,
+                is_gst=is_gst,
+            )
             database.create_connector_job(
                 user_id=user["id"],
                 company_id=company_id,
@@ -896,6 +911,7 @@ def _enqueue_polling_commit_run(run_id: int, company_id: int, import_id: int, re
                     "idempotency_key": fingerprint,
                 },
                 commit_run_id=run_id,
+                depends_on_job_ids=_ledger_dependency_ids(voucher_required_ledgers, missing_ledger_job_ids),
             )
         for error in result.errors:
             row = rows[error["row"]]
@@ -904,6 +920,65 @@ def _enqueue_polling_commit_run(run_id: int, company_id: int, import_id: int, re
     except Exception as exc:
         logger.exception("commit_run.enqueue_failed run_id=%s company_id=%s import_id=%s", run_id, company_id, import_id)
         database.fail_commit_run(run_id, str(exc))
+
+
+def _enqueue_missing_ledger_jobs(
+    user_id: int,
+    company: dict[str, Any],
+    agent_id: int,
+    required_ledgers: list[dict[str, str]],
+    commit_run_id: int,
+) -> dict[str, int]:
+    created_job_ids: dict[str, int] = {}
+    for ledger in required_ledgers:
+        ledger_name = ledger["ledger_name"].strip()
+        group_name = ledger["group_name"].strip()
+        if not ledger_name or database.get_ledger_by_name(ledger_name, company_id=company["id"]):
+            continue
+        job = database.create_connector_job(
+            user_id=user_id,
+            company_id=int(company["id"]),
+            agent_id=agent_id,
+            operation="create_ledger",
+            payload={
+                "name": ledger_name,
+                "group_name": group_name,
+                "company_name": company["company_name"],
+                "tally_url": company["tally_url"],
+            },
+            commit_run_id=commit_run_id,
+        )
+        created_job_ids[_ledger_key(ledger_name)] = int(job["id"])
+        logger.info(
+            "commit_run.create_missing_ledger_queued run_id=%s company_id=%s ledger_name=%s group_name=%s job_id=%s",
+            commit_run_id,
+            company["id"],
+            ledger_name,
+            group_name,
+            job["id"],
+        )
+    return created_job_ids
+
+
+def _required_ledgers_for_voucher_row(row: dict[str, Any] | None, company: dict[str, Any], is_gst: bool) -> list[dict[str, str]]:
+    if not row:
+        return []
+    if is_gst:
+        return required_gst_ledgers_for_rows([_row_to_gst(row)], company)
+    return required_ledgers_for_rows([_row_to_sale(row)], company)
+
+
+def _ledger_dependency_ids(required_ledgers: list[dict[str, str]], missing_ledger_job_ids: dict[str, int]) -> list[int]:
+    dependency_ids: list[int] = []
+    for ledger in required_ledgers:
+        job_id = missing_ledger_job_ids.get(_ledger_key(ledger.get("ledger_name")))
+        if job_id and job_id not in dependency_ids:
+            dependency_ids.append(job_id)
+    return dependency_ids
+
+
+def _ledger_key(name: Any) -> str:
+    return str(name or "").strip().lower()
 
 
 def _public_commit_run(run: dict[str, Any] | None) -> dict[str, Any] | None:

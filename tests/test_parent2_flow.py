@@ -1004,6 +1004,117 @@ class Parent2FlowTests(unittest.TestCase):
         self.assertEqual(row["commit_status"], "success")
         self.assertEqual(len(database.list_voucher_logs(company["id"])), 1)
 
+    def test_polling_commit_run_creates_only_missing_ledgers_before_vouchers(self) -> None:
+        original_mode = config.CONNECTOR_MODE
+        config.CONNECTOR_MODE = "polling"
+        self.addCleanup(lambda: setattr(config, "CONNECTOR_MODE", original_mode))
+        company = self.make_company()
+        agent = self.make_token_agent()
+        database.update_company(company["id"], self.user["id"], {"local_agent_id": agent["id"]})
+        self.seed_company_masters(company, include_upi=False)
+        database.upsert_ledger("Bank Transfer", "Bank Accounts", company_id=company["id"])
+        rows = [
+            {
+                "product_name": "2.75-18 NGP",
+                "price": 1600,
+                "payment_mode": "Bank Transfer",
+                "voucher_date": "2026-05-04",
+                "source_row_id": "2",
+            },
+            {
+                "product_name": "2.75-18 NGP",
+                "price": 1700,
+                "payment_mode": "Card",
+                "voucher_date": "2026-05-04",
+                "source_row_id": "3",
+            },
+        ]
+        import_record = database.create_import(self.user["id"], company["id"], "sales.xlsx", rows)
+        routes.process_import(company["id"], import_record["id"], user=self.user)
+
+        started = routes.start_commit_run(company["id"], import_record["id"], routes.CommitRequest(), background_tasks=None, user=self.user)
+        run = started["commit_run"]
+        jobs = database.list_connector_jobs_for_commit_run(run["id"])
+        ledger_jobs = [job for job in jobs if job["operation"] == "create_ledger"]
+        voucher_jobs = [job for job in jobs if job["operation"] == "create_sales_voucher"]
+
+        self.assertEqual([job["payload"]["name"] for job in ledger_jobs], ["Card"])
+        self.assertEqual(len(voucher_jobs), 2)
+        voucher_jobs_by_party = {job["payload"]["voucher"]["PartyLedgerName"]: job for job in voucher_jobs}
+        self.assertEqual(voucher_jobs_by_party["Bank Transfer"]["depends_on_job_ids"], [])
+        self.assertEqual(voucher_jobs_by_party["Card"]["depends_on_job_ids"], [ledger_jobs[0]["id"]])
+
+        first = routes.connector_poll(routes.ConnectorPollRequest(agent_id=agent["id"]), x_accountpilot_agent_token="agent-secret")["job"]
+        self.assertEqual(first["operation"], "create_ledger")
+        self.assertEqual(first["payload"]["name"], "Card")
+
+        existing_ledger_voucher = routes.connector_poll(routes.ConnectorPollRequest(agent_id=agent["id"]), x_accountpilot_agent_token="agent-secret")["job"]
+        self.assertEqual(existing_ledger_voucher["operation"], "create_sales_voucher")
+        self.assertEqual(existing_ledger_voucher["payload"]["voucher"]["PartyLedgerName"], "Bank Transfer")
+
+        routes.connector_job_result(
+            first["id"],
+            routes.ConnectorJobResultRequest(agent_id=agent["id"], status="success", result={"STATUS": "1"}),
+            x_accountpilot_agent_token="agent-secret",
+        )
+        self.assertIsNotNone(database.get_ledger_by_name("Card", company_id=company["id"]))
+
+        next_job = routes.connector_poll(routes.ConnectorPollRequest(agent_id=agent["id"]), x_accountpilot_agent_token="agent-secret")["job"]
+        self.assertEqual(next_job["operation"], "create_sales_voucher")
+        self.assertEqual(next_job["payload"]["voucher"]["PartyLedgerName"], "Card")
+
+    def test_polling_commit_run_failed_ledger_only_blocks_dependent_vouchers(self) -> None:
+        original_mode = config.CONNECTOR_MODE
+        config.CONNECTOR_MODE = "polling"
+        self.addCleanup(lambda: setattr(config, "CONNECTOR_MODE", original_mode))
+        company = self.make_company()
+        agent = self.make_token_agent()
+        database.update_company(company["id"], self.user["id"], {"local_agent_id": agent["id"]})
+        self.seed_company_masters(company, include_upi=False)
+        database.upsert_ledger("Bank Transfer", "Bank Accounts", company_id=company["id"])
+        rows = [
+            {
+                "product_name": "2.75-18 NGP",
+                "price": 1600,
+                "payment_mode": "Bank Transfer",
+                "voucher_date": "2026-05-04",
+                "source_row_id": "2",
+            },
+            {
+                "product_name": "2.75-18 NGP",
+                "price": 1700,
+                "payment_mode": "Card",
+                "voucher_date": "2026-05-04",
+                "source_row_id": "3",
+            },
+        ]
+        import_record = database.create_import(self.user["id"], company["id"], "sales.xlsx", rows)
+        routes.process_import(company["id"], import_record["id"], user=self.user)
+
+        started = routes.start_commit_run(company["id"], import_record["id"], routes.CommitRequest(), background_tasks=None, user=self.user)
+        run = started["commit_run"]
+        ledger_job = routes.connector_poll(routes.ConnectorPollRequest(agent_id=agent["id"]), x_accountpilot_agent_token="agent-secret")["job"]
+        bank_voucher_job = routes.connector_poll(routes.ConnectorPollRequest(agent_id=agent["id"]), x_accountpilot_agent_token="agent-secret")["job"]
+
+        self.assertEqual(ledger_job["operation"], "create_ledger")
+        self.assertEqual(bank_voucher_job["payload"]["voucher"]["PartyLedgerName"], "Bank Transfer")
+
+        routes.connector_job_result(
+            ledger_job["id"],
+            routes.ConnectorJobResultRequest(agent_id=agent["id"], status="failed", error_message="Ledger 'Card' does not exist"),
+            x_accountpilot_agent_token="agent-secret",
+        )
+
+        jobs = database.list_connector_jobs_for_commit_run(run["id"])
+        voucher_jobs_by_party = {job["payload"]["voucher"]["PartyLedgerName"]: job for job in jobs if job["operation"] == "create_sales_voucher"}
+        rows_after_failure = database.list_import_rows(import_record["id"], company["id"])
+        rows_by_source = {row["source_row_id"]: row for row in rows_after_failure}
+
+        self.assertEqual(voucher_jobs_by_party["Card"]["status"], "failed")
+        self.assertEqual(voucher_jobs_by_party["Bank Transfer"]["status"], "leased")
+        self.assertEqual(rows_by_source["3"]["commit_status"], "failed")
+        self.assertNotEqual(rows_by_source["2"]["commit_status"], "failed")
+
     def test_duplicate_looking_rows_are_allowed_in_import_path(self) -> None:
         company = self.make_company()
         agent = self.make_agent()
