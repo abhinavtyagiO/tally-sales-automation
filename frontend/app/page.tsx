@@ -331,7 +331,7 @@ export default function Home() {
       if (HELPER_SETUP_ENABLED && activeCompany?.id) {
         try {
           await api(`/companies/${activeCompany.id}/connector/health-check`, { method: "POST", body: JSON.stringify({}) });
-          await loadConnectorStatus(activeCompany.id);
+          await waitForConnectorHealth(activeCompany.id);
         } catch (statusError) {
           setTallyStatus({ status: "disconnected", message: statusError instanceof Error ? statusError.message : "Can't connect to Tally right now.", detail: "connector_unavailable" });
         }
@@ -350,7 +350,10 @@ export default function Home() {
     setError("");
     try {
       await api(`/companies/${activeCompany.id}/sync`, { method: "POST" });
-      await Promise.all([loadCompanies(), loadStockItems(activeCompany.id), loadTallyStatus()]);
+      await waitForMasterSync(activeCompany.id);
+      await api(`/companies/${activeCompany.id}/connector/health-check`, { method: "POST", body: JSON.stringify({}) });
+      await waitForConnectorHealth(activeCompany.id);
+      await Promise.all([loadCompanies(), loadStockItems(activeCompany.id)]);
     } catch (syncError) {
       setError(syncError instanceof Error ? syncError.message : "Inventory sync failed");
     } finally {
@@ -376,6 +379,10 @@ export default function Home() {
       });
       setActiveCompanyId(data.company.id);
       if (HELPER_SETUP_ENABLED) await waitForMasterSync(data.company.id);
+      if (HELPER_SETUP_ENABLED) {
+        await api(`/companies/${data.company.id}/connector/health-check`, { method: "POST", body: JSON.stringify({}) });
+        await waitForConnectorHealth(data.company.id);
+      }
       await loadCompanies();
       setCompanyName("");
       setSupplierGstin("");
@@ -399,6 +406,17 @@ export default function Home() {
       await new Promise((resolve) => window.setTimeout(resolve, 1000));
     }
     throw new Error("Tally master sync is still running. Please try again in a few seconds.");
+  }
+
+  async function waitForConnectorHealth(companyId: number) {
+    for (let attempt = 0; attempt < 20; attempt += 1) {
+      const data = await api(`/companies/${companyId}/connector/status`);
+      if (data?.status) setTallyStatus(data);
+      if (data?.status === "connected") return;
+      if (data?.status === "disconnected" && data?.detail !== "connector_unavailable") throw new Error(data?.message || "Can't connect to Tally right now.");
+      await new Promise((resolve) => window.setTimeout(resolve, 1000));
+    }
+    throw new Error("Tally connection check is still running. Please try again in a few seconds.");
   }
 
   async function selectCompany(companyId: number) {
