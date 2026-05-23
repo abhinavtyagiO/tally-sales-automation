@@ -96,9 +96,10 @@ class Parent2FlowTests(unittest.TestCase):
 
     def test_auth_service_creates_user_and_server_side_session(self) -> None:
         response = Response()
-        user = auth_service.create_login_session("test:new@example.test", response)
+        login = auth_service.create_login_session("test:new@example.test", response)
 
-        self.assertEqual(user["email"], "new@example.test")
+        self.assertEqual(login["user"]["email"], "new@example.test")
+        self.assertTrue(login["session_token"])
         cookie = response.headers["set-cookie"]
         self.assertIn(auth_service.SESSION_COOKIE, cookie)
 
