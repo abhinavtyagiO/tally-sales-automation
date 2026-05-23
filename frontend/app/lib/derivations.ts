@@ -116,6 +116,10 @@ export function tallyIsConnected(status: TallyStatus | null) {
   return status?.status === "connected";
 }
 
+export function tallyIsChecking(status: TallyStatus | null) {
+  return status?.status === "checking";
+}
+
 export function getVoucherIdentifier(row: ImportRow) {
   return findIdentifier(row.tally_response) || "";
 }
