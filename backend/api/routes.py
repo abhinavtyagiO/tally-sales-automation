@@ -161,8 +161,7 @@ class CommitRequest(BaseModel):
 @router.post("/auth/google")
 def google_login(request: AuthRequest, response: Response) -> dict[str, Any]:
     logger.info("auth.login.request_received")
-    user = auth_service.create_login_session(request.id_token, response)
-    return {"user": user}
+    return auth_service.create_login_session(request.id_token, response)
 
 
 @router.get("/auth/me")

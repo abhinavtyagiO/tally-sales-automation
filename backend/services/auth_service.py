@@ -91,18 +91,34 @@ def create_login_session(id_token: str, response: Response) -> dict[str, Any]:
         secure=config.COOKIE_SECURE,
         max_age=config.SESSION_TTL_DAYS * 24 * 60 * 60,
     )
-    logger.info("auth.login.success user_id=%s email=%s expires_at=%s", user["id"], user["email"], expires_at)
-    return user
+    logger.info(
+        "auth.login.success user_id=%s email=%s expires_at=%s cookie_secure=%s cookie_samesite=%s bearer_fallback_issued=true",
+        user["id"],
+        user["email"],
+        expires_at,
+        config.COOKIE_SECURE,
+        config.COOKIE_SAMESITE,
+    )
+    return {"user": user, "session_token": token}
 
 
 def get_current_user(request: Request, tally_session: Optional[str] = Cookie(default=None)) -> dict[str, Any]:
     bearer_token = _bearer_token(request)
     token = tally_session or bearer_token
+    auth_source = "cookie" if tally_session else "bearer" if bearer_token else "missing"
     if not token:
+        logger.info(
+            "auth.session.missing path=%s has_cookie=%s has_authorization=%s",
+            request.url.path,
+            bool(request.cookies.get(SESSION_COOKIE)),
+            bool(request.headers.get("authorization")),
+        )
         raise HTTPException(status_code=401, detail="Authentication required")
     session = database.get_session_by_hash(hash_token(token))
     if not session:
+        logger.info("auth.session.invalid path=%s auth_source=%s", request.url.path, auth_source)
         raise HTTPException(status_code=401, detail="Invalid or expired session")
+    logger.info("auth.session.accepted path=%s auth_source=%s user_id=%s", request.url.path, auth_source, session["user_id"])
     return {
         "id": session["user_id"],
         "google_sub": session["google_sub"],

@@ -12,6 +12,7 @@ const ENABLE_DEV_LOGIN = process.env.NEXT_PUBLIC_ENABLE_DEV_LOGIN === "true";
 const HELPER_DOWNLOAD_URL = process.env.NEXT_PUBLIC_HELPER_DOWNLOAD_URL || "";
 const CONNECTOR_MODE = (process.env.NEXT_PUBLIC_CONNECTOR_MODE || (process.env.NODE_ENV === "production" ? "polling" : "direct")).toLowerCase();
 const HELPER_SETUP_ENABLED = CONNECTOR_MODE === "polling";
+const SESSION_TOKEN_KEY = "accountpilot.session_token";
 
 declare global {
   interface Window {
@@ -116,18 +117,25 @@ export default function Home() {
   }, [user, helperStatus?.status, helperInstallCommand]);
 
   async function api(path: string, init: RequestInit = {}) {
+    const sessionToken = getStoredSessionToken();
     const response = await fetch(`${apiUrl()}${path}`, {
       credentials: "include",
-      headers: { "Content-Type": "application/json", ...(init.headers || {}) },
+      headers: {
+        "Content-Type": "application/json",
+        ...(sessionToken ? { Authorization: `Bearer ${sessionToken}` } : {}),
+        ...(init.headers || {}),
+      },
       ...init,
     });
     return parseResponse(response);
   }
 
   async function uploadApi(path: string, formData: FormData) {
+    const sessionToken = getStoredSessionToken();
     const response = await fetch(`${apiUrl()}${path}`, {
       method: "POST",
       credentials: "include",
+      headers: sessionToken ? { Authorization: `Bearer ${sessionToken}` } : undefined,
       body: formData,
     });
     return parseResponse(response);
@@ -153,6 +161,7 @@ export default function Home() {
       setUser(data.user);
       await Promise.all([loadCompanies(), HELPER_SETUP_ENABLED ? loadHelperStatus() : Promise.resolve(), loadTallyStatus(), loadTallyCompanies()]);
     } catch {
+      clearStoredSessionToken();
       setUser(null);
     }
   }
@@ -162,6 +171,7 @@ export default function Home() {
     setError("");
     try {
       const data = await api("/auth/google", { method: "POST", body: JSON.stringify({ id_token: idToken }) });
+      if (data.session_token) storeSessionToken(data.session_token);
       setUser(data.user);
       await Promise.all([loadCompanies(), HELPER_SETUP_ENABLED ? loadHelperStatus() : Promise.resolve(), loadTallyStatus(), loadTallyCompanies()]);
     } catch (loginError) {
@@ -182,6 +192,7 @@ export default function Home() {
     } catch {
       // Reset the local UI even if the server session has already expired.
     } finally {
+      clearStoredSessionToken();
       setUser(null);
       setCompanies([]);
       setActiveCompanyId(null);
@@ -608,4 +619,19 @@ function buildHelperDownloadHref(setupToken: string) {
   url.searchParams.set("setup_token", setupToken);
   url.searchParams.set("backend_url", apiUrl());
   return url.toString();
+}
+
+function getStoredSessionToken() {
+  if (typeof window === "undefined") return "";
+  return window.localStorage.getItem(SESSION_TOKEN_KEY) || "";
+}
+
+function storeSessionToken(token: string) {
+  if (typeof window === "undefined") return;
+  window.localStorage.setItem(SESSION_TOKEN_KEY, token);
+}
+
+function clearStoredSessionToken() {
+  if (typeof window === "undefined") return;
+  window.localStorage.removeItem(SESSION_TOKEN_KEY);
 }
