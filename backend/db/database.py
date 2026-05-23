@@ -205,6 +205,7 @@ def init_db() -> None:
                 commit_run_id INTEGER,
                 operation TEXT NOT NULL,
                 payload_json TEXT NOT NULL,
+                depends_on_job_ids_json TEXT,
                 status TEXT NOT NULL DEFAULT 'queued',
                 attempt_count INTEGER NOT NULL DEFAULT 0,
                 available_after TEXT,
@@ -334,6 +335,7 @@ def _migrate_existing_tables(connection: sqlite3.Connection) -> None:
         ("import_rows", "igst_amount", "REAL"),
         ("import_rows", "total_amount", "REAL"),
         ("connector_jobs", "commit_run_id", "INTEGER"),
+        ("connector_jobs", "depends_on_job_ids_json", "TEXT"),
     ]:
         _ensure_column(connection, table, column, definition)
     connection.execute("UPDATE companies SET sales_ledger_group_name = COALESCE(sales_ledger_group_name, ?) ", (config.SALES_LEDGER_GROUP,))
@@ -812,18 +814,30 @@ def create_connector_job(
     payload: dict[str, Any],
     available_after: str | None = None,
     commit_run_id: int | None = None,
+    depends_on_job_ids: list[int] | None = None,
 ) -> dict[str, Any]:
     now = utc_now()
     with get_connection() as connection:
         cursor = connection.execute(
             """
             INSERT INTO connector_jobs (
-                user_id, company_id, agent_id, commit_run_id, operation, payload_json,
+                user_id, company_id, agent_id, commit_run_id, operation, payload_json, depends_on_job_ids_json,
                 status, available_after, created_at, updated_at
             )
-            VALUES (?, ?, ?, ?, ?, ?, 'queued', ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, 'queued', ?, ?, ?)
             """,
-            (user_id, company_id, agent_id, commit_run_id, operation, json.dumps(payload), available_after, now, now),
+            (
+                user_id,
+                company_id,
+                agent_id,
+                commit_run_id,
+                operation,
+                json.dumps(payload),
+                json.dumps(depends_on_job_ids or []),
+                available_after,
+                now,
+                now,
+            ),
         )
         return get_connector_job(cursor.lastrowid, connection=connection)
 
@@ -842,17 +856,17 @@ def get_connector_job(job_id: int, connection: sqlite3.Connection | None = None)
 def lease_next_connector_job(agent_id: int, lease_expires_at: str) -> dict[str, Any] | None:
     now = utc_now()
     with get_connection() as connection:
-        row = connection.execute(
+        rows = connection.execute(
             """
             SELECT * FROM connector_jobs
             WHERE agent_id = ?
               AND status = 'queued'
               AND (available_after IS NULL OR available_after <= ?)
             ORDER BY id
-            LIMIT 1
             """,
             (agent_id, now),
-        ).fetchone()
+        ).fetchall()
+        row = next((candidate for candidate in rows if _dependencies_satisfied(connection, candidate)), None)
         if not row:
             return None
         job_id = int(row["id"])
@@ -868,6 +882,22 @@ def lease_next_connector_job(agent_id: int, lease_expires_at: str) -> dict[str, 
             (lease_expires_at, now, job_id),
         )
         return get_connector_job(job_id, connection=connection)
+
+
+def _dependencies_satisfied(connection: sqlite3.Connection, row: sqlite3.Row) -> bool:
+    try:
+        dependency_ids = json.loads(row["depends_on_job_ids_json"] or "[]")
+    except (TypeError, ValueError):
+        dependency_ids = []
+    dependency_ids = [int(job_id) for job_id in dependency_ids if str(job_id).strip()]
+    if not dependency_ids:
+        return True
+    placeholders = ",".join("?" for _ in dependency_ids)
+    completed_count = connection.execute(
+        f"SELECT COUNT(*) AS completed_count FROM connector_jobs WHERE id IN ({placeholders}) AND status = 'completed'",
+        dependency_ids,
+    ).fetchone()["completed_count"]
+    return completed_count == len(dependency_ids)
 
 
 def complete_connector_job(job_id: int, agent_id: int, result: dict[str, Any] | None = None) -> dict[str, Any] | None:
@@ -979,6 +1009,10 @@ def _decode_connector_job(job: dict[str, Any]) -> dict[str, Any]:
                 job[target] = {}
         else:
             job[target] = {}
+    try:
+        job["depends_on_job_ids"] = json.loads(job.get("depends_on_job_ids_json") or "[]")
+    except (TypeError, ValueError):
+        job["depends_on_job_ids"] = []
     return job
 
 
@@ -1429,17 +1463,61 @@ def refresh_commit_run_from_rows(run_id: int) -> dict[str, Any] | None:
         total = counts["total_count"] or 0
         success = counts["success_count"] or 0
         failed = counts["failed_count"] or 0
-        jobs = list_connector_jobs_for_commit_run(run_id)
-        job_terminal = jobs and all(job["status"] in {"completed", "failed"} for job in jobs)
+        jobs = _list_connector_jobs_for_commit_run(connection, run_id)
+        voucher_jobs = [job for job in jobs if job["operation"] == "create_sales_voucher"]
+        ledger_jobs = [job for job in jobs if job["operation"] == "create_ledger"]
+        if any(job["status"] == "failed" for job in ledger_jobs):
+            failed_ledger_job_ids = {int(job["id"]) for job in ledger_jobs if job["status"] == "failed"}
+            now = utc_now()
+            for job in voucher_jobs:
+                dependency_ids = {int(job_id) for job_id in job.get("depends_on_job_ids", [])}
+                if not failed_ledger_job_ids.intersection(dependency_ids) or job["status"] in {"completed", "failed"}:
+                    continue
+                error_message = "Required ledger creation failed"
+                connection.execute(
+                    """
+                    UPDATE connector_jobs
+                    SET status = 'failed',
+                        error_message = ?,
+                        completed_at = ?,
+                        updated_at = ?
+                    WHERE id = ? AND status != 'completed'
+                    """,
+                    (error_message, now, now, job["id"]),
+                )
+                source = ((job.get("payload") or {}).get("voucher") or {}).get("Source") or {}
+                import_row_id = source.get("import_row_id")
+                if import_row_id:
+                    connection.execute(
+                        "UPDATE import_rows SET commit_status = 'failed', commit_error = COALESCE(commit_error, ?) WHERE id = ? AND commit_status != 'success'",
+                        (error_message, int(import_row_id)),
+                    )
+            jobs = _list_connector_jobs_for_commit_run(connection, run_id)
+            voucher_jobs = [job for job in jobs if job["operation"] == "create_sales_voucher"]
+            counts = connection.execute(
+                """
+                SELECT
+                    COUNT(*) AS total_count,
+                    SUM(CASE WHEN commit_status = 'success' THEN 1 ELSE 0 END) AS success_count,
+                    SUM(CASE WHEN commit_status = 'failed' THEN 1 ELSE 0 END) AS failed_count
+                FROM import_rows
+                WHERE import_id = ?
+                  AND validation_status = 'valid'
+                """,
+                (run["import_id"],),
+            ).fetchone()
+            success = counts["success_count"] or 0
+            failed = counts["failed_count"] or 0
+        job_terminal = voucher_jobs and all(job["status"] in {"completed", "failed"} for job in voucher_jobs)
         status = "completed" if job_terminal and success + failed >= total else "processing"
         completed_at = utc_now() if status == "completed" else None
         result = {
             "results": [
                 {"job_id": job["id"], "status": "success" if job["status"] == "completed" else "failed", "error": job.get("error_message")}
                 for job in jobs
-                if job["status"] in {"completed", "failed"}
+                if job["status"] in {"completed", "failed"} and job["operation"] == "create_sales_voucher"
             ],
-            "rows": list_import_rows(run["import_id"], run["company_id"]),
+            "rows": _list_import_rows_for_import(connection, run["import_id"], run["company_id"]),
             "success_count": success,
             "failed_count": failed,
         }
@@ -1464,6 +1542,34 @@ def refresh_commit_run_from_rows(run_id: int) -> dict[str, Any] | None:
             )
         row = connection.execute("SELECT * FROM commit_runs WHERE id = ?", (run_id,)).fetchone()
         return _decode_commit_run(dict(row)) if row else None
+
+
+def _list_connector_jobs_for_commit_run(connection: sqlite3.Connection, commit_run_id: int) -> list[dict[str, Any]]:
+    return [
+        _decode_connector_job(dict(row))
+        for row in connection.execute(
+            """
+            SELECT * FROM connector_jobs
+            WHERE commit_run_id = ?
+            ORDER BY id
+            """,
+            (commit_run_id,),
+        )
+    ]
+
+
+def _list_import_rows_for_import(connection: sqlite3.Connection, import_id: int, company_id: int) -> list[dict[str, Any]]:
+    return [
+        _decode_import_row(row)
+        for row in connection.execute(
+            """
+            SELECT * FROM import_rows
+            WHERE import_id = ? AND company_id = ?
+            ORDER BY id
+            """,
+            (import_id, company_id),
+        )
+    ]
 
 
 def fail_commit_run(run_id: int, error_message: str) -> dict[str, Any] | None:

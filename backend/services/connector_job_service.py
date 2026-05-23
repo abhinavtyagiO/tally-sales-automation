@@ -270,6 +270,10 @@ def _apply_job_result(job: dict[str, Any]) -> None:
         if job.get("commit_run_id"):
             database.refresh_commit_run_from_rows(int(job["commit_run_id"]))
         return
+    if job["status"] == "failed" and job.get("company_id") and job["operation"] == "create_ledger":
+        if job.get("commit_run_id"):
+            database.refresh_commit_run_from_rows(int(job["commit_run_id"]))
+        return
     if job["status"] == "failed" and job.get("company_id") and job["operation"] in {SYNC_LEDGERS_OPERATION, SYNC_STOCK_ITEMS_OPERATION}:
         database.set_company_sync(int(job["company_id"]), "failed", None)
         return
@@ -282,6 +286,9 @@ def _apply_job_result(job: dict[str, Any]) -> None:
         database.replace_ledgers(result.get("ledgers") or [], company_id=company_id)
     elif job["operation"] == SYNC_STOCK_ITEMS_OPERATION:
         database.replace_stock_items(result.get("stock_items") or [], company_id=company_id)
+    elif job["operation"] == "create_ledger":
+        database.upsert_ledger(str(payload["name"]), str(payload["group_name"]), company_id=company_id)
+        return
     elif job["operation"] == "create_sales_voucher":
         voucher = payload.get("voucher") or {}
         source = voucher.get("Source") or {}
