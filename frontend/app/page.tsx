@@ -384,6 +384,7 @@ export default function Home() {
         await waitForConnectorHealth(data.company.id);
       }
       await loadCompanies();
+      await loadCompanies();
       setCompanyName("");
       setSupplierGstin("");
       setSupplierState("");
@@ -418,7 +419,7 @@ export default function Home() {
     }
     throw new Error("Tally connection check is still running. Please try again in a few seconds.");
   }
-
+  
   async function selectCompany(companyId: number) {
     setBusy(true);
     setError("");
