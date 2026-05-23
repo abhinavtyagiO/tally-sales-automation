@@ -33,6 +33,7 @@ import {
   lastSyncText,
   summarizePreview,
   tallyIsConnected,
+  tallyIsChecking,
 } from "./lib/derivations";
 import type { AppView, CommitRun, CommitSummary, Company, HelperStatus, ImportPreview, ImportRecord, ImportRow, ImportType, StockItem, StockItemsResponse, TallyCompanies, TallyStatus, User } from "./lib/types";
 
@@ -238,7 +239,7 @@ export function SetupView({
   return (
     <div className="setup-layout">
       <section className="hero-panel">
-        <StatusIcon connected={tallyIsConnected(tallyStatus)} />
+        <StatusIcon connected={tallyIsConnected(tallyStatus)} checking={tallyIsChecking(tallyStatus)} />
         <div>
           <p className="eyebrow">First-run setup</p>
           <h1>Connect your Tally company</h1>
@@ -400,11 +401,11 @@ export function DashboardView({
       {error && <p className="alert error-alert">{error}</p>}
       <div className="dashboard-grid">
         <section className="card connection-card">
-          <StatusIcon connected={tallyIsConnected(tallyStatus)} />
+          <StatusIcon connected={tallyIsConnected(tallyStatus)} checking={tallyIsChecking(tallyStatus)} />
           <div>
             <h3>Tally Prime Connection</h3>
-            <p className={tallyIsConnected(tallyStatus) ? "status-line success-text" : "status-line error-text"}>
-              {tallyIsConnected(tallyStatus) ? "Connected" : "Disconnected"}
+            <p className={tallyIsConnected(tallyStatus) ? "status-line success-text" : tallyIsChecking(tallyStatus) ? "status-line checking-text" : "status-line error-text"}>
+              {tallyIsConnected(tallyStatus) ? "Connected" : tallyIsChecking(tallyStatus) ? "Checking" : "Disconnected"}
               <span>{tallyStatus?.message || "Checking Tally connection..."}</span>
             </p>
           </div>
@@ -1088,16 +1089,21 @@ function escapeXml(value: string) {
 
 function TallyConnection({ status }: { status: TallyStatus | null }) {
   const connected = tallyIsConnected(status);
+  const checking = tallyIsChecking(status);
   return (
-    <div className={connected ? "connection-mini connected" : "connection-mini disconnected"}>
-      {connected ? <CheckCircle2 size={18} /> : <XCircle size={18} />}
+    <div className={connected ? "connection-mini connected" : checking ? "connection-mini checking" : "connection-mini disconnected"}>
+      {connected ? <CheckCircle2 size={18} /> : checking ? <RefreshCw size={18} /> : <XCircle size={18} />}
       <span>{status?.message || "Checking Tally connection..."}</span>
     </div>
   );
 }
 
-function StatusIcon({ connected }: { connected: boolean }) {
-  return <span className={connected ? "status-icon connected" : "status-icon disconnected"}>{connected ? <CheckCircle2 size={28} /> : <XCircle size={28} />}</span>;
+function StatusIcon({ connected, checking = false }: { connected: boolean; checking?: boolean }) {
+  return (
+    <span className={connected ? "status-icon connected" : checking ? "status-icon checking" : "status-icon disconnected"}>
+      {connected ? <CheckCircle2 size={28} /> : checking ? <RefreshCw size={28} /> : <XCircle size={28} />}
+    </span>
+  );
 }
 
 function MetricCard({ label, value, tone, inverse = false }: { label: string; value: string; tone?: "success" | "error"; inverse?: boolean }) {

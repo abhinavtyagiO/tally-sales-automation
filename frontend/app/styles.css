@@ -539,6 +539,11 @@ h3 {
   color: var(--success);
 }
 
+.status-icon.checking {
+  background: var(--warning-bg);
+  color: var(--warning);
+}
+
 .status-icon.disconnected {
   background: var(--error-bg);
   color: var(--error);
@@ -555,6 +560,11 @@ h3 {
 .connection-mini.connected {
   background: var(--success-bg);
   color: var(--success);
+}
+
+.connection-mini.checking {
+  background: var(--warning-bg);
+  color: var(--warning);
 }
 
 .connection-mini.disconnected {
@@ -877,6 +887,10 @@ tr:last-child td {
 
 .success-text {
   color: var(--success);
+}
+
+.checking-text {
+  color: var(--warning);
 }
 
 .error-text {

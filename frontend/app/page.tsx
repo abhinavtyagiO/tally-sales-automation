@@ -331,6 +331,7 @@ export default function Home() {
       if (HELPER_SETUP_ENABLED && activeCompany?.id) {
         try {
           await api(`/companies/${activeCompany.id}/connector/health-check`, { method: "POST", body: JSON.stringify({}) });
+          setTallyStatus({ status: "checking", message: "Checking Tally connection...", detail: null });
           await waitForConnectorHealth(activeCompany.id);
         } catch (statusError) {
           setTallyStatus({ status: "disconnected", message: statusError instanceof Error ? statusError.message : "Can't connect to Tally right now.", detail: "connector_unavailable" });
@@ -352,6 +353,7 @@ export default function Home() {
       await api(`/companies/${activeCompany.id}/sync`, { method: "POST" });
       await waitForMasterSync(activeCompany.id);
       await api(`/companies/${activeCompany.id}/connector/health-check`, { method: "POST", body: JSON.stringify({}) });
+      setTallyStatus({ status: "checking", message: "Checking Tally connection...", detail: null });
       await waitForConnectorHealth(activeCompany.id);
       await Promise.all([loadCompanies(), loadStockItems(activeCompany.id)]);
     } catch (syncError) {
@@ -381,6 +383,7 @@ export default function Home() {
       if (HELPER_SETUP_ENABLED) await waitForMasterSync(data.company.id);
       if (HELPER_SETUP_ENABLED) {
         await api(`/companies/${data.company.id}/connector/health-check`, { method: "POST", body: JSON.stringify({}) });
+        setTallyStatus({ status: "checking", message: "Checking Tally connection...", detail: null });
         await waitForConnectorHealth(data.company.id);
       }
       await loadCompanies();
