@@ -42,14 +42,21 @@ class PollingConnector:
     def run_forever(self) -> None:
         while True:
             try:
-                ran_job = self.run_once()
+                job_count = self.run_until_idle()
                 self._backoff_seconds = self.settings.poll_interval_seconds
-                if not ran_job:
-                    time.sleep(self.settings.poll_interval_seconds)
+                if job_count:
+                    logger.info("connector.batch_drained job_count=%s", job_count)
+                time.sleep(self.settings.poll_interval_seconds)
             except Exception as exc:
                 logger.warning("connector.loop_failed error=%r", exc)
                 time.sleep(self._backoff_seconds)
                 self._backoff_seconds = min(self._backoff_seconds * 2, self.settings.max_backoff_seconds)
+
+    def run_until_idle(self) -> int:
+        job_count = 0
+        while self.run_once():
+            job_count += 1
+        return job_count
 
     def run_once(self) -> bool:
         job = self.poll()

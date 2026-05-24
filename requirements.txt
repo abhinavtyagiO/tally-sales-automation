@@ -4,3 +4,5 @@ pandas
 openpyxl
 requests
 python-multipart
+pystray
+pillow

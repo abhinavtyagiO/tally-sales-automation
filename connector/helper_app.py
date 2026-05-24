@@ -9,6 +9,14 @@ from tkinter import ttk
 
 from connector.main import PollingConnector, build_parser, configure_from_setup_args, configure_logging, settings_from_env
 
+try:
+    import pystray
+    from PIL import Image, ImageDraw
+except ImportError:
+    pystray = None
+    Image = None
+    ImageDraw = None
+
 
 class HelperApp:
     def __init__(self, startup_error: str = "") -> None:
@@ -16,9 +24,11 @@ class HelperApp:
         self.root.title("AccountPilot Helper")
         self.root.geometry("380x180")
         self.root.resizable(False, False)
+        self.root.protocol("WM_DELETE_WINDOW", self.hide_window)
         self.status_var = tk.StringVar(value="Starting AccountPilot Helper...")
         self.last_activity_var = tk.StringVar(value="Last activity: Not yet")
         self.error_var = tk.StringVar(value=startup_error)
+        self.tray_icon = None
 
         frame = ttk.Frame(self.root, padding=20)
         frame.pack(fill="both", expand=True)
@@ -39,8 +49,11 @@ class HelperApp:
     def run(self) -> None:
         if self.connector:
             self.thread.start()
+            self.hide_window()
+            self._start_tray_icon()
         else:
             self.status_var.set("Connection needs attention")
+            self.show_window()
         self.root.mainloop()
 
     def _run_loop(self) -> None:
@@ -48,8 +61,8 @@ class HelperApp:
             try:
                 if not self.connector:
                     return
-                ran_job = self.connector.run_once()
-                if ran_job:
+                job_count = self.connector.run_until_idle()
+                if job_count:
                     self._set_status("AccountPilot connected", "")
                     self.root.after(0, self.last_activity_var.set, f"Last activity: {time.strftime('%I:%M %p')}")
                 else:
@@ -62,6 +75,42 @@ class HelperApp:
     def _set_status(self, status: str, error: str) -> None:
         self.root.after(0, self.status_var.set, status)
         self.root.after(0, self.error_var.set, error)
+
+    def show_window(self) -> None:
+        self.root.after(0, self.root.deiconify)
+        self.root.after(0, self.root.lift)
+
+    def hide_window(self) -> None:
+        self.root.withdraw()
+
+    def quit(self) -> None:
+        if self.tray_icon:
+            self.tray_icon.stop()
+        self.root.after(0, self.root.destroy)
+
+    def _start_tray_icon(self) -> None:
+        if not pystray or not Image or not ImageDraw:
+            return
+        self.tray_icon = pystray.Icon(
+            "AccountPilotHelper",
+            _build_tray_image(),
+            "AccountPilot Helper",
+            menu=pystray.Menu(
+                pystray.MenuItem("Open AccountPilot Helper", lambda *args: self.show_window()),
+                pystray.MenuItem("Exit", lambda *args: self.quit()),
+            ),
+        )
+        threading.Thread(target=self.tray_icon.run, daemon=True).start()
+
+
+def _build_tray_image():
+    image = Image.new("RGBA", (64, 64), (255, 255, 255, 0))
+    draw = ImageDraw.Draw(image)
+    draw.rounded_rectangle((8, 8, 56, 56), radius=12, fill=(37, 99, 235, 255))
+    draw.rectangle((19, 20, 45, 27), fill=(255, 255, 255, 255))
+    draw.rectangle((19, 31, 45, 38), fill=(255, 255, 255, 255))
+    draw.rectangle((19, 42, 36, 49), fill=(255, 255, 255, 255))
+    return image
 
 
 def main() -> None:
