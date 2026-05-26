@@ -29,6 +29,8 @@ export type TallyStatus = {
 export type TallyCompanies = {
   available: boolean;
   companies: string[];
+  status?: "helper_required" | "not_requested" | "checking" | "available" | "empty" | "failed" | string;
+  detail?: string | null;
   message?: string | null;
 };
 
@@ -111,6 +113,17 @@ export type StockItemsResponse = {
   categories: string[];
   low_stock_count: number;
   items: StockItem[];
+};
+
+export type MasterSyncStatus = {
+  status: "not_requested" | "syncing" | "completed" | "failed" | string;
+  message?: string | null;
+  jobs?: Array<{
+    id: number;
+    operation: string;
+    status: string;
+    completed_at?: string | null;
+  }>;
 };
 
 export type CommitResult = {
