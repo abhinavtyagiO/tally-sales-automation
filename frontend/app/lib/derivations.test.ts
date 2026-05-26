@@ -11,7 +11,8 @@ import {
   getVoucherIdentifier,
   summarizePreview,
 } from "./derivations.ts";
-import type { ImportRecord, ImportRow } from "./types";
+import { deriveOnboardingState, isCompanySetupComplete } from "./onboarding.ts";
+import type { Company, ImportRecord, ImportRow } from "./types";
 
 const baseImport: ImportRecord = {
   id: 1,
@@ -106,4 +107,88 @@ test("formatRowError extracts short row-level Tally errors", () => {
     "Tally rejected the voucher date. If Tally is in educational mode, use the 1st, 2nd, or 31st of a month.",
   );
   assert.equal(formatRowError("Product not found in synced Tally stock items"), "Product not found in synced Tally stock items.");
+});
+
+test("deriveOnboardingState gates production progress by real setup facts", () => {
+  const base = deriveOnboardingState({
+    helperSetupEnabled: true,
+    activeCompany: null,
+    helperStatus: null,
+    tallyStatus: null,
+    tallyCompanies: { available: false, companies: [] },
+    syncStatus: null,
+    requestedStepId: "company",
+    local: {
+      welcomeComplete: true,
+      tallyPrepared: true,
+      helperDownloaded: true,
+      commandRun: false,
+      connectionAcknowledged: false,
+    },
+  });
+
+  assert.equal(base.currentStepId, "run_command");
+  assert.equal(base.connectionReady, false);
+  assert.equal(base.steps.find((step) => step.id === "company")?.locked, true);
+});
+
+test("deriveOnboardingState resumes connected users at company setup after acknowledgement", () => {
+  const state = deriveOnboardingState({
+    helperSetupEnabled: true,
+    activeCompany: null,
+    helperStatus: { status: "connected", message: "Connected" },
+    tallyStatus: { status: "connected", message: "Connected to Tally" },
+    tallyCompanies: { available: true, companies: ["Bhrama Enterprises"], status: "available" },
+    syncStatus: null,
+    requestedStepId: "company",
+    local: {
+      welcomeComplete: true,
+      tallyPrepared: true,
+      helperDownloaded: true,
+      commandRun: true,
+      connectionAcknowledged: true,
+    },
+  });
+
+  assert.equal(state.currentStepId, "company");
+  assert.equal(state.connectionReady, true);
+  assert.equal(state.steps.find((step) => step.id === "company")?.locked, false);
+});
+
+test("deriveOnboardingState sends syncing companies to sync and completed companies to ready", () => {
+  const company: Company = {
+    id: 1,
+    company_name: "Bhrama Enterprises",
+    tally_url: "http://127.0.0.1:9000",
+    supplier_gstin: "29AAECP4424C1ZN",
+    supplier_state: "Karnataka",
+    last_sync_status: "queued",
+  };
+  const facts = {
+    helperSetupEnabled: true,
+    activeCompany: company,
+    helperStatus: { status: "connected", message: "Connected" },
+    tallyStatus: { status: "connected", message: "Connected" },
+    tallyCompanies: { available: true, companies: ["Bhrama Enterprises"], status: "available" },
+    syncStatus: { status: "syncing", message: "Syncing Tally masters..." },
+    requestedStepId: "ready",
+    local: {
+      welcomeComplete: true,
+      tallyPrepared: true,
+      helperDownloaded: true,
+      commandRun: true,
+      connectionAcknowledged: true,
+    },
+  } as const;
+  const syncing = deriveOnboardingState(facts);
+  const completedCompany = { ...company, last_sync_status: "success", last_sync_at: "2026-05-26T10:00:00+05:30" };
+  const ready = deriveOnboardingState({
+    ...facts,
+    activeCompany: { ...company, last_sync_status: "success", last_sync_at: "2026-05-26T10:00:00+05:30" },
+    syncStatus: { status: "completed", message: "Tally masters synced." },
+  });
+
+  assert.equal(syncing.currentStepId, "sync");
+  assert.equal(ready.currentStepId, "ready");
+  assert.equal(isCompanySetupComplete(completedCompany), true);
 });

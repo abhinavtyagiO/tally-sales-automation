@@ -2,9 +2,11 @@
 
 import { useEffect, useMemo, useRef, useState } from "react";
 
-import { AppShell, CommitResultView, DashboardView, HistoryDetailView, HistoryView, InventoryView, LoginPanel, PreviewCommitView, SetupView, UploadView } from "./components";
+import { AppShell, CommitResultView, DashboardView, HistoryDetailView, HistoryView, InventoryView, LoginPanel, PreviewCommitView, UploadView } from "./components";
 import { formatUserError, tallyIsConnected } from "./lib/derivations";
-import type { AppView, CommitRun, CommitSummary, Company, HelperStatus, ImportPreview, ImportRecord, ImportRow, ImportType, StockItemsResponse, TallyCompanies, TallyStatus, User } from "./lib/types";
+import { deriveOnboardingState, isCompanySetupComplete, type OnboardingLocalState, type OnboardingStepId } from "./lib/onboarding";
+import type { AppView, CommitRun, CommitSummary, Company, HelperStatus, ImportPreview, ImportRecord, ImportRow, ImportType, MasterSyncStatus, StockItemsResponse, TallyCompanies, TallyStatus, User } from "./lib/types";
+import { OnboardingFlow } from "./onboarding";
 
 const CONFIGURED_API_URL = process.env.NEXT_PUBLIC_API_URL || "";
 const GOOGLE_CLIENT_ID = process.env.NEXT_PUBLIC_GOOGLE_CLIENT_ID || "";
@@ -12,6 +14,7 @@ const ENABLE_DEV_LOGIN = process.env.NEXT_PUBLIC_ENABLE_DEV_LOGIN === "true";
 const HELPER_DOWNLOAD_URL = process.env.NEXT_PUBLIC_HELPER_DOWNLOAD_URL || "";
 const CONNECTOR_MODE = (process.env.NEXT_PUBLIC_CONNECTOR_MODE || (process.env.NODE_ENV === "production" ? "polling" : "direct")).toLowerCase();
 const HELPER_SETUP_ENABLED = CONNECTOR_MODE === "polling";
+const ALLOW_ONBOARDING_DEV_NAV = process.env.NEXT_PUBLIC_ONBOARDING_DEV_NAV === "true" || process.env.NODE_ENV !== "production";
 const SESSION_TOKEN_KEY = "accountpilot.session_token";
 
 declare global {
@@ -41,6 +44,16 @@ export default function Home() {
   const [importDetails, setImportDetails] = useState<Record<number, ImportRow[]>>({});
   const [stockItems, setStockItems] = useState<StockItemsResponse | null>(null);
   const [activeView, setActiveView] = useState<AppView>("dashboard");
+  const [onboardingActive, setOnboardingActive] = useState(false);
+  const [requestedOnboardingStep, setRequestedOnboardingStep] = useState<OnboardingStepId>("welcome");
+  const [onboardingLocal, setOnboardingLocal] = useState<OnboardingLocalState>({
+    welcomeComplete: false,
+    tallyPrepared: false,
+    helperDownloaded: false,
+    commandRun: false,
+    connectionAcknowledged: false,
+  });
+  const [masterSyncStatus, setMasterSyncStatus] = useState<MasterSyncStatus | null>(null);
   const [companyName, setCompanyName] = useState("");
   const [supplierGstin, setSupplierGstin] = useState("");
   const [supplierState, setSupplierState] = useState("");
@@ -54,10 +67,27 @@ export default function Home() {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const helperSetupInFlight = useRef(false);
+  const syncStartRequestedFor = useRef<number | null>(null);
 
   const activeCompany = useMemo(
     () => companies.find((company) => company.id === activeCompanyId) || companies[0] || null,
     [companies, activeCompanyId],
+  );
+  const shouldShowOnboarding = Boolean(user && (!activeCompany || onboardingActive || !isCompanySetupComplete(activeCompany)));
+  const onboardingState = useMemo(
+    () =>
+      deriveOnboardingState({
+        helperSetupEnabled: HELPER_SETUP_ENABLED,
+        activeCompany,
+        helperStatus,
+        tallyStatus,
+        tallyCompanies,
+        syncStatus: masterSyncStatus,
+        local: onboardingLocal,
+        requestedStepId: requestedOnboardingStep,
+        allowDevNavigation: ALLOW_ONBOARDING_DEV_NAV,
+      }),
+    [activeCompany, helperStatus, masterSyncStatus, onboardingLocal, requestedOnboardingStep, tallyCompanies, tallyStatus],
   );
 
   useEffect(() => {
@@ -115,6 +145,51 @@ export default function Home() {
     if (!HELPER_SETUP_ENABLED || !user || !helperStatus || helperStatus.status === "connected" || helperInstallCommand) return;
     void prepareHelperSetup();
   }, [user, helperStatus?.status, helperInstallCommand]);
+
+  useEffect(() => {
+    if (!shouldShowOnboarding) return;
+    if (activeCompany && !isCompanySetupComplete(activeCompany)) {
+      setRequestedOnboardingStep("sync");
+      setOnboardingActive(true);
+      void loadMasterSyncStatus(activeCompany.id);
+      return;
+    }
+    if (!activeCompany && onboardingState.connectionReady && requestedOnboardingStep === "welcome") {
+      setRequestedOnboardingStep("connected");
+      return;
+    }
+    if (!activeCompany && onboardingState.helperReady && requestedOnboardingStep === "welcome") {
+      setRequestedOnboardingStep("connecting");
+      return;
+    }
+    if (onboardingState.connectionReady && requestedOnboardingStep === "connecting") {
+      setRequestedOnboardingStep("connected");
+    }
+  }, [activeCompany?.id, activeCompany?.last_sync_at, activeCompany?.last_sync_status, onboardingState.connectionReady, onboardingState.helperReady, requestedOnboardingStep, shouldShowOnboarding]);
+
+  useEffect(() => {
+    if (!shouldShowOnboarding || onboardingState.currentStepId !== "connecting") return;
+    void checkOnboardingConnection();
+    const interval = window.setInterval(() => {
+      void checkOnboardingConnection();
+    }, 3000);
+    return () => window.clearInterval(interval);
+  }, [onboardingState.currentStepId, shouldShowOnboarding]);
+
+  useEffect(() => {
+    if (!shouldShowOnboarding || onboardingState.currentStepId !== "sync" || !activeCompany?.id) return;
+    void ensureOnboardingSync(activeCompany.id);
+    const interval = window.setInterval(() => {
+      void loadMasterSyncStatus(activeCompany.id);
+    }, 2000);
+    return () => window.clearInterval(interval);
+  }, [activeCompany?.id, onboardingState.currentStepId, shouldShowOnboarding]);
+
+  useEffect(() => {
+    if (!shouldShowOnboarding || onboardingState.currentStepId !== "sync" || masterSyncStatus?.status !== "completed") return;
+    setRequestedOnboardingStep("ready");
+    void loadCompanies();
+  }, [masterSyncStatus?.status, onboardingState.currentStepId, shouldShowOnboarding]);
 
   async function api(path: string, init: RequestInit = {}) {
     const sessionToken = getStoredSessionToken();
@@ -205,6 +280,17 @@ export default function Home() {
       setHistoryDetail(null);
       setTallyStatus(null);
       setHelperStatus(null);
+      setOnboardingActive(false);
+      setRequestedOnboardingStep("welcome");
+      setOnboardingLocal({
+        welcomeComplete: false,
+        tallyPrepared: false,
+        helperDownloaded: false,
+        commandRun: false,
+        connectionAcknowledged: false,
+      });
+      setMasterSyncStatus(null);
+      syncStartRequestedFor.current = null;
       setBusy(false);
       setActiveView("dashboard");
     }
@@ -225,9 +311,9 @@ export default function Home() {
     }
   }
 
-  async function loadTallyCompanies() {
+  async function loadTallyCompanies(forceConnector = false) {
     try {
-      if (HELPER_SETUP_ENABLED && helperStatus?.status === "connected") {
+      if (HELPER_SETUP_ENABLED && (forceConnector || helperStatus?.status === "connected")) {
         const connectorCompanies = await api("/connector/tally-companies");
         if (connectorCompanies.status === "not_requested") {
           const queued = await api("/connector/tally-companies/check", { method: "POST", body: JSON.stringify({}) });
@@ -246,12 +332,16 @@ export default function Home() {
   async function loadHelperStatus() {
     if (!HELPER_SETUP_ENABLED) {
       setHelperStatus(null);
-      return;
+      return null;
     }
     try {
-      setHelperStatus(await api("/connector/status"));
+      const status = await api("/connector/status");
+      setHelperStatus(status);
+      return status as HelperStatus;
     } catch {
-      setHelperStatus({ status: "helper_required", message: "Install AccountPilot Helper to connect with Tally.", agent: null });
+      const fallback: HelperStatus = { status: "helper_required", message: "Install AccountPilot Helper to connect with Tally.", agent: null };
+      setHelperStatus(fallback);
+      return fallback;
     }
   }
 
@@ -291,6 +381,64 @@ export default function Home() {
       if (data?.status) setTallyStatus(data);
     } catch {
       // Keep the current direct-mode status if the tracer endpoint is unavailable.
+    }
+  }
+
+  async function checkOnboardingConnection() {
+    if (!HELPER_SETUP_ENABLED) {
+      await Promise.all([loadTallyStatus(), loadTallyCompanies()]);
+      return;
+    }
+    const status = await loadHelperStatus();
+    if (status?.status === "connected") {
+      await loadTallyCompanies(true);
+    }
+  }
+
+  async function loadMasterSyncStatus(companyId: number) {
+    try {
+      const data = await api(`/companies/${companyId}/connector/sync`);
+      setMasterSyncStatus(data);
+      return data as MasterSyncStatus;
+    } catch (syncError) {
+      const fallback: MasterSyncStatus = {
+        status: "failed",
+        message: syncError instanceof Error ? syncError.message : "Unable to check Tally master sync.",
+        jobs: [],
+      };
+      setMasterSyncStatus(fallback);
+      return fallback;
+    }
+  }
+
+  async function ensureOnboardingSync(companyId: number) {
+    const status = await loadMasterSyncStatus(companyId);
+    if (status.status !== "not_requested" || syncStartRequestedFor.current === companyId) return;
+    syncStartRequestedFor.current = companyId;
+    try {
+      const started = await api(`/companies/${companyId}/connector/sync`, { method: "POST", body: JSON.stringify({}) });
+      setMasterSyncStatus(started.status || started);
+    } catch (syncError) {
+      setMasterSyncStatus({
+        status: "failed",
+        message: syncError instanceof Error ? syncError.message : "Unable to start Tally master sync.",
+        jobs: [],
+      });
+    }
+  }
+
+  async function retryOnboardingSync() {
+    if (!activeCompany?.id || busy) return;
+    setBusy(true);
+    setError("");
+    syncStartRequestedFor.current = null;
+    try {
+      const started = await api(`/companies/${activeCompany.id}/connector/sync`, { method: "POST", body: JSON.stringify({}) });
+      setMasterSyncStatus(started.status || started);
+    } catch (syncError) {
+      setError(syncError instanceof Error ? syncError.message : "Unable to start Tally master sync");
+    } finally {
+      setBusy(false);
     }
   }
 
@@ -380,19 +528,16 @@ export default function Home() {
         }),
       });
       setActiveCompanyId(data.company.id);
-      if (HELPER_SETUP_ENABLED) await waitForMasterSync(data.company.id);
-      if (HELPER_SETUP_ENABLED) {
-        await api(`/companies/${data.company.id}/connector/health-check`, { method: "POST", body: JSON.stringify({}) });
-        setTallyStatus({ status: "checking", message: "Checking Tally connection...", detail: null });
-        await waitForConnectorHealth(data.company.id);
-      }
+      setOnboardingActive(true);
+      setRequestedOnboardingStep("sync");
+      setMasterSyncStatus(data.sync?.status || null);
+      syncStartRequestedFor.current = data.company.id;
       await loadCompanies();
       setCompanyName("");
       setSupplierGstin("");
       setSupplierState("");
       setPreview(null);
       setCommitSummary(null);
-      setActiveView("dashboard");
     } catch (companyError) {
       setError(companyError instanceof Error ? companyError.message : "Company was not added");
     } finally {
@@ -522,6 +667,45 @@ export default function Home() {
     }
   }
 
+  function requestOnboardingStep(step: OnboardingStepId) {
+    setRequestedOnboardingStep(step);
+  }
+
+  function completeWelcome() {
+    setOnboardingActive(true);
+    setOnboardingLocal((current) => ({ ...current, welcomeComplete: true }));
+    setRequestedOnboardingStep("prepare_tally");
+  }
+
+  function completePrepareTally() {
+    setOnboardingLocal((current) => ({ ...current, welcomeComplete: true, tallyPrepared: true }));
+    setRequestedOnboardingStep("download_helper");
+  }
+
+  function confirmHelperDownloaded() {
+    setOnboardingLocal((current) => ({ ...current, welcomeComplete: true, tallyPrepared: true, helperDownloaded: true }));
+    setRequestedOnboardingStep("run_command");
+  }
+
+  function confirmCommandRun() {
+    setOnboardingLocal((current) => ({ ...current, welcomeComplete: true, tallyPrepared: true, helperDownloaded: true, commandRun: true }));
+    setRequestedOnboardingStep("connecting");
+    void checkOnboardingConnection();
+  }
+
+  function acknowledgeConnection() {
+    if (!onboardingState.connectionReady) return;
+    setOnboardingLocal((current) => ({ ...current, connectionAcknowledged: true }));
+    setRequestedOnboardingStep("company");
+    void loadTallyCompanies(HELPER_SETUP_ENABLED);
+  }
+
+  function finishOnboarding(destination: AppView) {
+    setOnboardingActive(false);
+    setRequestedOnboardingStep("welcome");
+    setActiveView(destination);
+  }
+
   if (!user) {
     return (
       <LoginPanel
@@ -537,33 +721,45 @@ export default function Home() {
     );
   }
 
-  if (!activeCompany) {
+  if (shouldShowOnboarding) {
     return (
-      <AppShell user={user} activeView="dashboard" setActiveView={setActiveView} activeCompany={null} companies={companies} busy={busy} logout={logout} refreshConnection={refreshConnection}>
-        <SetupView
-          companyName={companyName}
-          setCompanyName={setCompanyName}
-          supplierGstin={supplierGstin}
-          setSupplierGstin={setSupplierGstin}
-          supplierState={supplierState}
-          setSupplierState={setSupplierState}
-          tallyCompanies={tallyCompanies}
-          tallyStatus={tallyStatus}
-          helperStatus={helperStatus}
-          helperInstallCommand={helperInstallCommand}
-          helperDownloadHref={helperDownloadHref}
-          addCompany={addCompany}
-          startHelperSetup={startHelperSetup}
-          showHelperSetup={HELPER_SETUP_ENABLED}
-          helperDownloadConfigured={Boolean(HELPER_DOWNLOAD_URL)}
-          refreshConnection={refreshConnection}
-          busy={busy}
-          existingCompanies={companies}
-          error={error}
-        />
-      </AppShell>
+      <OnboardingFlow
+        user={user}
+        state={onboardingState}
+        busy={busy}
+        error={error}
+        helperStatus={helperStatus}
+        tallyStatus={tallyStatus}
+        tallyCompanies={tallyCompanies}
+        syncStatus={masterSyncStatus}
+        helperInstallCommand={helperInstallCommand}
+        helperDownloadHref={helperDownloadHref}
+        helperDownloadConfigured={Boolean(HELPER_DOWNLOAD_URL)}
+        companyName={companyName}
+        setCompanyName={setCompanyName}
+        supplierGstin={supplierGstin}
+        setSupplierGstin={setSupplierGstin}
+        supplierState={supplierState}
+        setSupplierState={setSupplierState}
+        existingCompanies={companies}
+        requestStep={requestOnboardingStep}
+        completeWelcome={completeWelcome}
+        completePrepareTally={completePrepareTally}
+        confirmHelperDownloaded={confirmHelperDownloaded}
+        confirmCommandRun={confirmCommandRun}
+        acknowledgeConnection={acknowledgeConnection}
+        startHelperSetup={startHelperSetup}
+        refreshConnection={refreshConnection}
+        addCompany={addCompany}
+        retrySync={retryOnboardingSync}
+        goToDashboard={() => finishOnboarding("dashboard")}
+        goToUpload={() => finishOnboarding("upload")}
+        logout={logout}
+      />
     );
   }
+
+  if (!activeCompany) return null;
 
   return (
     <AppShell
