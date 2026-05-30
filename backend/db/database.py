@@ -463,6 +463,89 @@ def get_user(user_id: int) -> dict[str, Any] | None:
         return dict(row) if row else None
 
 
+def delete_user_data_by_email(email: str) -> dict[str, Any]:
+    normalized_email = email.strip().lower()
+    if not normalized_email:
+        return {"email": normalized_email, "deleted": False, "counts": {}}
+    with get_connection() as connection:
+        users = [
+            dict(row)
+            for row in connection.execute(
+                "SELECT * FROM users WHERE lower(email) = lower(?)",
+                (normalized_email,),
+            )
+        ]
+        if not users:
+            return {"email": normalized_email, "deleted": False, "counts": {}}
+        user_ids = [int(user["id"]) for user in users]
+        result = _delete_user_data_by_ids(connection, user_ids)
+        result["email"] = normalized_email
+        return result
+
+
+def delete_user_data(user_id: int) -> dict[str, Any]:
+    with get_connection() as connection:
+        user = connection.execute("SELECT * FROM users WHERE id = ?", (user_id,)).fetchone()
+        if not user:
+            return {"deleted": False, "user_ids": [], "counts": {}}
+        result = _delete_user_data_by_ids(connection, [user_id])
+        result["email"] = user["email"]
+        return result
+
+
+def _delete_user_data_by_ids(connection: sqlite3.Connection, user_ids: list[int]) -> dict[str, Any]:
+    placeholders = ",".join("?" for _ in user_ids)
+    company_ids = [
+        int(row["id"])
+        for row in connection.execute(
+            f"SELECT id FROM companies WHERE user_id IN ({placeholders})",
+            user_ids,
+        )
+    ]
+    import_ids = [
+        int(row["id"])
+        for row in connection.execute(
+            f"SELECT id FROM imports WHERE user_id IN ({placeholders})",
+            user_ids,
+        )
+    ]
+
+    counts: dict[str, int] = {}
+
+    def delete_where(table: str, condition: str, params: list[Any]) -> None:
+        cursor = connection.execute(f"DELETE FROM {table} WHERE {condition}", params)
+        counts[table] = counts.get(table, 0) + max(cursor.rowcount, 0)
+
+    if company_ids:
+        company_placeholders = ",".join("?" for _ in company_ids)
+        delete_where("connector_jobs", f"company_id IN ({company_placeholders})", company_ids)
+        delete_where("vouchers_log", f"company_id IN ({company_placeholders})", company_ids)
+        delete_where("commit_runs", f"company_id IN ({company_placeholders})", company_ids)
+        delete_where("import_rows", f"company_id IN ({company_placeholders})", company_ids)
+        delete_where("stock_items", f"company_id IN ({company_placeholders})", company_ids)
+        delete_where("ledgers", f"company_id IN ({company_placeholders})", company_ids)
+    if import_ids:
+        import_placeholders = ",".join("?" for _ in import_ids)
+        delete_where("vouchers_log", f"import_id IN ({import_placeholders})", import_ids)
+        delete_where("commit_runs", f"import_id IN ({import_placeholders})", import_ids)
+        delete_where("import_rows", f"import_id IN ({import_placeholders})", import_ids)
+
+    delete_where("connector_jobs", f"user_id IN ({placeholders})", user_ids)
+    delete_where("vouchers_log", f"user_id IN ({placeholders})", user_ids)
+    delete_where("commit_runs", f"user_id IN ({placeholders})", user_ids)
+    delete_where("imports", f"user_id IN ({placeholders})", user_ids)
+    delete_where("companies", f"user_id IN ({placeholders})", user_ids)
+    delete_where("sessions", f"user_id IN ({placeholders})", user_ids)
+    delete_where("local_agents", f"user_id IN ({placeholders})", user_ids)
+    delete_where("users", f"id IN ({placeholders})", user_ids)
+
+    return {
+        "deleted": True,
+        "user_ids": user_ids,
+        "counts": counts,
+    }
+
+
 def create_session(user_id: int, token_hash: str, expires_at: str) -> dict[str, Any]:
     with get_connection() as connection:
         cursor = connection.execute(

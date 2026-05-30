@@ -187,6 +187,91 @@ class Parent2FlowTests(unittest.TestCase):
 
         self.assertEqual(raised.exception.status_code, 404)
 
+    def test_support_delete_user_data_requires_admin_token(self) -> None:
+        original = config.SUPPORT_ADMIN_TOKEN
+        config.SUPPORT_ADMIN_TOKEN = "support-secret"
+        self.addCleanup(lambda: setattr(config, "SUPPORT_ADMIN_TOKEN", original))
+
+        with self.assertRaises(HTTPException) as missing:
+            routes.support_delete_user_data(
+                routes.SupportDeleteUserDataRequest(email=self.user["email"], confirm_email=self.user["email"]),
+                x_accountpilot_support_token=None,
+            )
+        with self.assertRaises(HTTPException) as invalid:
+            routes.support_delete_user_data(
+                routes.SupportDeleteUserDataRequest(email=self.user["email"], confirm_email=self.user["email"]),
+                x_accountpilot_support_token="wrong-secret",
+            )
+
+        self.assertEqual(missing.exception.status_code, 401)
+        self.assertEqual(invalid.exception.status_code, 401)
+
+    def test_support_delete_user_data_removes_user_scoped_records(self) -> None:
+        original = config.SUPPORT_ADMIN_TOKEN
+        config.SUPPORT_ADMIN_TOKEN = "support-secret"
+        self.addCleanup(lambda: setattr(config, "SUPPORT_ADMIN_TOKEN", original))
+        company = self.make_company()
+        other_company = self.make_company(user_id=self.other_user["id"], company_name="Other Company")
+        agent = self.make_token_agent()
+        database.update_company(company["id"], self.user["id"], {"local_agent_id": agent["id"]})
+        self.seed_company_masters(company)
+        self.seed_company_masters(other_company)
+        import_record = self.upload_rows(company)
+        row = database.list_import_rows(import_record["id"], company["id"])[0]
+        run = database.create_commit_run(self.user["id"], company["id"], import_record["id"], total_count=1)
+        database.create_connector_job(
+            user_id=self.user["id"],
+            company_id=company["id"],
+            agent_id=agent["id"],
+            operation="create_sales_voucher",
+            payload={"voucher": {"Source": {"import_row_id": row["id"]}}, "company_name": company["company_name"]},
+            commit_run_id=run["id"],
+        )
+        database.log_voucher(
+            {"voucher": "request"},
+            {"status": "ok"},
+            "success",
+            source={
+                "user_id": self.user["id"],
+                "company_id": company["id"],
+                "import_id": import_record["id"],
+                "import_row_id": row["id"],
+                "source_row_id": row["source_row_id"],
+            },
+        )
+
+        result = routes.support_delete_user_data(
+            routes.SupportDeleteUserDataRequest(email=self.user["email"], confirm_email=self.user["email"]),
+            x_accountpilot_support_token="support-secret",
+        )
+
+        self.assertTrue(result["deleted"])
+        self.assertEqual(result["counts"]["users"], 1)
+        self.assertIsNone(database.get_user(self.user["id"]))
+        self.assertIsNotNone(database.get_user(self.other_user["id"]))
+        self.assertEqual(database.list_companies(self.user["id"]), [])
+        self.assertEqual(len(database.list_companies(self.other_user["id"])), 1)
+        with database.get_connection() as connection:
+            for table in ("sessions", "local_agents", "companies", "imports", "import_rows", "commit_runs", "connector_jobs", "vouchers_log"):
+                count = connection.execute(f"SELECT COUNT(*) AS count FROM {table} WHERE user_id = ?", (self.user["id"],)).fetchone()["count"] if table not in {"import_rows"} else 0
+                if table == "import_rows":
+                    count = connection.execute("SELECT COUNT(*) AS count FROM import_rows WHERE company_id = ?", (company["id"],)).fetchone()["count"]
+                self.assertEqual(count, 0, table)
+            self.assertEqual(connection.execute("SELECT COUNT(*) AS count FROM stock_items WHERE company_id = ?", (company["id"],)).fetchone()["count"], 0)
+            self.assertEqual(connection.execute("SELECT COUNT(*) AS count FROM ledgers WHERE company_id = ?", (company["id"],)).fetchone()["count"], 0)
+
+    def test_support_delete_my_data_removes_authenticated_user_without_admin_token(self) -> None:
+        company = self.make_company()
+        self.seed_company_masters(company)
+
+        result = routes.support_delete_my_data(user=self.user)
+
+        self.assertTrue(result["deleted"])
+        self.assertEqual(result["counts"]["users"], 1)
+        self.assertIsNone(database.get_user(self.user["id"]))
+        self.assertIsNotNone(database.get_user(self.other_user["id"]))
+        self.assertEqual(database.list_companies(self.user["id"]), [])
+
     def test_company_scoped_masters_allow_same_names(self) -> None:
         first = self.make_company(company_name="Company A")
         second = self.make_company(company_name="Company B")

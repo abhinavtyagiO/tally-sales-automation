@@ -28,6 +28,7 @@ LOCAL_AGENT_URL = os.getenv("LOCAL_AGENT_URL", "http://localhost:9100")
 CONNECTOR_MODE = os.getenv("CONNECTOR_MODE", "direct").lower()
 LOCAL_AGENT_BOOTSTRAP_ENABLED = os.getenv("LOCAL_AGENT_BOOTSTRAP_ENABLED", "true" if APP_ENV != "production" else "false").lower() == "true"
 LOCAL_AGENT_TOKEN = os.getenv("LOCAL_AGENT_TOKEN", "")
+SUPPORT_ADMIN_TOKEN = os.getenv("SUPPORT_ADMIN_TOKEN", "")
 LEGACY_ENDPOINTS_ENABLED = os.getenv("LEGACY_ENDPOINTS_ENABLED", "true" if APP_ENV != "production" else "false").lower() == "true"
 GOOGLE_CLIENT_ID = os.getenv("GOOGLE_CLIENT_ID", "")
 ALLOW_DEV_AUTH = os.getenv("ALLOW_DEV_AUTH", "false").lower() == "true"
