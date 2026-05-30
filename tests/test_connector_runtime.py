@@ -153,6 +153,67 @@ class ConnectorRuntimeTests(unittest.TestCase):
         self.assertEqual(result["stock_items"][0]["name"], "2.75-18 NGP")
         self.assertNotIn("raw", result["stock_items"][0])
 
+    def test_stock_group_sync_dispatch_returns_compact_group_details(self) -> None:
+        connector = PollingConnector(self.settings(), FakeTransport({"job": None}))
+        tally_response = {
+            "ENVELOPE": {
+                "BODY": {
+                    "DATA": {
+                        "COLLECTION": {
+                            "STOCKGROUP": {
+                                "NAME": "Tyres",
+                                "PARENT": "Primary",
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        with patch("connector.main.TallyClient") as client_class:
+            client_class.return_value.export_stock_groups.return_value = tally_response
+            result = connector.dispatch(
+                {
+                    "id": 1,
+                    "operation": "sync_stock_groups",
+                    "payload": {"company_name": "Bhrama Enterprises", "tally_url": "http://127.0.0.1:9000"},
+                }
+            )
+
+        self.assertEqual(result["summary"], {"stock_group_count": 1})
+        self.assertEqual(result["stock_groups"], [{"name": "Tyres", "parent_name": "Primary"}])
+
+    def test_stock_items_for_group_dispatch_uses_group_specific_export(self) -> None:
+        connector = PollingConnector(self.settings(), FakeTransport({"job": None}))
+        tally_response = {
+            "ENVELOPE": {
+                "BODY": {
+                    "DATA": {
+                        "COLLECTION": {
+                            "STOCKITEM": {
+                                "NAME": "2.75-18 NGP",
+                                "PARENT": "Tyres",
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        with patch("connector.main.TallyClient") as client_class:
+            client_class.return_value.export_stock_items_for_group.return_value = tally_response
+            result = connector.dispatch(
+                {
+                    "id": 1,
+                    "operation": "sync_stock_items_for_group",
+                    "payload": {"company_name": "Bhrama Enterprises", "group_name": "Tyres", "tally_url": "http://127.0.0.1:9000"},
+                }
+            )
+
+        client_class.return_value.export_stock_items_for_group.assert_called_once_with("Bhrama Enterprises", "Tyres")
+        self.assertEqual(result["summary"], {"stock_item_count": 1, "group_name": "Tyres"})
+        self.assertEqual(result["stock_items"][0]["name"], "2.75-18 NGP")
+
     def test_register_with_setup_token_persists_connector_config(self) -> None:
         transport = FakeRegistrationTransport()
         with tempfile.TemporaryDirectory() as tmpdir:

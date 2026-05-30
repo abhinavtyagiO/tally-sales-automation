@@ -455,7 +455,7 @@ class Parent2FlowTests(unittest.TestCase):
             routes.ConnectorPollRequest(agent_id=registered["agent"]["id"]),
             x_accountpilot_agent_token=registered["agent_auth_token"],
         )["job"]
-        self.assertIn(first_job["operation"], {"sync_ledgers", "sync_stock_items"})
+        self.assertIn(first_job["operation"], {"sync_ledgers", "sync_stock_groups"})
 
     def test_polling_upload_uses_cached_masters_without_local_dispatch(self) -> None:
         original_mode = config.CONNECTOR_MODE
@@ -657,7 +657,7 @@ class Parent2FlowTests(unittest.TestCase):
         database.update_company(company["id"], self.user["id"], {"local_agent_id": agent["id"]})
 
         created = routes.create_connector_master_sync(company["id"], user=self.user)
-        self.assertEqual([job["operation"] for job in created["jobs"]], ["sync_ledgers", "sync_stock_items"])
+        self.assertEqual([job["operation"] for job in created["jobs"]], ["sync_ledgers", "sync_stock_groups"])
         self.assertEqual(created["status"]["status"], "syncing")
 
         ledgers_job = routes.connector_poll(
@@ -678,10 +678,36 @@ class Parent2FlowTests(unittest.TestCase):
         self.assertEqual(len(database.list_ledgers(company["id"])), 2)
         self.assertEqual(routes.connector_master_sync_status(company["id"], user=self.user)["status"], "syncing")
 
+        stock_groups_job = routes.connector_poll(
+            routes.ConnectorPollRequest(agent_id=agent["id"]),
+            x_accountpilot_agent_token="agent-secret",
+        )["job"]
+        routes.connector_job_result(
+            stock_groups_job["id"],
+            routes.ConnectorJobResultRequest(
+                agent_id=agent["id"],
+                status="success",
+                result={"stock_groups": [{"name": "Tyres", "parent_name": "Primary"}]},
+            ),
+            x_accountpilot_agent_token="agent-secret",
+        )
+
+        status = routes.connector_master_sync_status(company["id"], user=self.user)
+        company = database.get_company(company["id"], user_id=self.user["id"])
+        stored_stock_groups_job = database.get_connector_job(stock_groups_job["id"])
+        self.assertEqual(stored_stock_groups_job["result"], {"summary": {"stock_group_count": 1}})
+        self.assertEqual(status["status"], "completed")
+        self.assertEqual(company["last_sync_status"], "success")
+        self.assertIsNotNone(company["last_sync_at"])
+        stock_groups = database.list_stock_groups(company["id"])
+        self.assertEqual(len(stock_groups), 1)
+        self.assertEqual(stock_groups[0]["sync_status"], "queued")
+
         stock_job = routes.connector_poll(
             routes.ConnectorPollRequest(agent_id=agent["id"]),
             x_accountpilot_agent_token="agent-secret",
         )["job"]
+        self.assertEqual(stock_job["operation"], "sync_stock_items_for_group")
         routes.connector_job_result(
             stock_job["id"],
             routes.ConnectorJobResultRequest(
@@ -691,16 +717,9 @@ class Parent2FlowTests(unittest.TestCase):
             ),
             x_accountpilot_agent_token="agent-secret",
         )
-
-        status = routes.connector_master_sync_status(company["id"], user=self.user)
-        company = database.get_company(company["id"], user_id=self.user["id"])
-        stored_stock_job = database.get_connector_job(stock_job["id"])
-        self.assertEqual(stored_stock_job["result"], {"summary": {"stock_item_count": 1}})
-        self.assertEqual(status["status"], "completed")
-        self.assertEqual(company["last_sync_status"], "success")
-        self.assertIsNotNone(company["last_sync_at"])
         stock_items = database.list_stock_items(company["id"])
         self.assertEqual(len(stock_items), 1)
+        self.assertEqual(stock_items[0]["stock_group_id"], stock_groups[0]["id"])
         self.assertNotIn("raw", stock_items[0])
 
     def test_failed_connector_health_job_updates_visible_status(self) -> None:

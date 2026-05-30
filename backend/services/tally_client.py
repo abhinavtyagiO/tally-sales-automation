@@ -154,6 +154,12 @@ class TallyClient:
     def export_stock_items(self, company_name: str | None = None) -> dict[str, Any]:
         return self._post_xml(_stock_items_collection_xml(company_name))
 
+    def export_stock_groups(self, company_name: str | None = None) -> dict[str, Any]:
+        return self._post_xml(_stock_groups_collection_xml(company_name))
+
+    def export_stock_items_for_group(self, company_name: str, group_name: str) -> dict[str, Any]:
+        return self._post_xml(_stock_items_collection_xml(company_name, group_name=group_name))
+
     def get_company_name(self) -> str | None:
         data = self.export_data("Company")
         company = _find_first(data, "CompanyName") or _find_first(data, "Name")
@@ -291,6 +297,13 @@ def _stock_item_details(item: dict[str, Any]) -> dict[str, Any]:
         ),
         "hsn_description": _text_value(_get_ci(item, "GSTHSNDescription") or _find_first_text(item, "GSTHSNDescription")),
         "taxability": _text_value(_get_ci(item, "GSTOVRDNTaxability") or _get_ci(item, "Taxability") or _find_first(item, "GSTOVRDNTaxability") or _find_first(item, "Taxability")),
+    }
+
+
+def _stock_group_details(item: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "name": _text_value(_get_ci(item, "Name") or _find_first(item, "Name")),
+        "parent_name": _text_value(_get_ci(item, "Parent") or _get_ci(item, "Group")),
     }
 
 
@@ -468,8 +481,37 @@ def _sales_voucher_xml(voucher: dict[str, Any], company_name: str | None = None)
 </ENVELOPE>"""
 
 
-def _stock_items_collection_xml(company_name: str | None = None) -> str:
+def _stock_groups_collection_xml(company_name: str | None = None) -> str:
     company_xml = f"<SVCURRENTCOMPANY>{_xml_text(company_name)}</SVCURRENTCOMPANY>" if company_name else ""
+    return f"""<ENVELOPE>
+  <HEADER>
+    <VERSION>1</VERSION>
+    <TALLYREQUEST>Export</TALLYREQUEST>
+    <TYPE>Collection</TYPE>
+    <ID>AccountPilotStockGroups</ID>
+  </HEADER>
+  <BODY>
+    <DESC>
+      <STATICVARIABLES>
+        <SVEXPORTFORMAT>XML</SVEXPORTFORMAT>
+        {company_xml}
+      </STATICVARIABLES>
+      <TDL>
+        <TDLMESSAGE>
+          <COLLECTION NAME="AccountPilotStockGroups" ISMODIFY="No">
+            <TYPE>Stock Group</TYPE>
+            <FETCH>Name,Parent</FETCH>
+          </COLLECTION>
+        </TDLMESSAGE>
+      </TDL>
+    </DESC>
+  </BODY>
+</ENVELOPE>"""
+
+
+def _stock_items_collection_xml(company_name: str | None = None, group_name: str | None = None) -> str:
+    company_xml = f"<SVCURRENTCOMPANY>{_xml_text(company_name)}</SVCURRENTCOMPANY>" if company_name else ""
+    group_xml = f"<CHILDOF>{_xml_text(group_name)}</CHILDOF>" if group_name else ""
     fetch_fields = ",".join(
         [
             "Name",
@@ -515,6 +557,7 @@ def _stock_items_collection_xml(company_name: str | None = None) -> str:
         <TDLMESSAGE>
           <COLLECTION NAME="AccountPilotStockItems" ISMODIFY="No">
             <TYPE>Stock Item</TYPE>
+            {group_xml}
             <FETCH>{fetch_fields}</FETCH>
           </COLLECTION>
         </TDLMESSAGE>

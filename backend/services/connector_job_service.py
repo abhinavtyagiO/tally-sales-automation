@@ -17,6 +17,8 @@ LIST_COMPANIES_OPERATION = "list_companies"
 VALIDATE_COMPANY_OPERATION = "validate_company"
 SYNC_LEDGERS_OPERATION = "sync_ledgers"
 SYNC_STOCK_ITEMS_OPERATION = "sync_stock_items"
+SYNC_STOCK_GROUPS_OPERATION = "sync_stock_groups"
+SYNC_STOCK_ITEMS_FOR_GROUP_OPERATION = "sync_stock_items_for_group"
 LEASE_SECONDS = 60
 
 
@@ -81,13 +83,13 @@ def create_master_sync_jobs(user_id: int, company: dict[str, Any]) -> dict[str, 
             "tally_url": company["tally_url"],
         },
     )
-    stock_job = database.create_connector_job(
+    stock_groups_job = database.create_connector_job(
         user_id=user_id,
         company_id=int(company["id"]),
         agent_id=int(agent["id"]),
-        operation=SYNC_STOCK_ITEMS_OPERATION,
+        operation=SYNC_STOCK_GROUPS_OPERATION,
         payload={
-            "collection_id": "StockItem",
+            "collection_id": "StockGroup",
             "company_name": company["company_name"],
             "tally_url": company["tally_url"],
         },
@@ -98,9 +100,31 @@ def create_master_sync_jobs(user_id: int, company: dict[str, Any]) -> dict[str, 
         company["id"],
         agent["id"],
         ledgers_job["id"],
-        stock_job["id"],
+        stock_groups_job["id"],
     )
-    return {"jobs": [ledgers_job, stock_job], "status": get_master_sync_status(int(company["id"]))}
+    return {"jobs": [ledgers_job, stock_groups_job], "status": get_master_sync_status(int(company["id"]))}
+
+
+def create_stock_group_retry_job(user_id: int, company: dict[str, Any], stock_group_id: int) -> dict[str, Any]:
+    agent = _company_agent(user_id, company)
+    group = database.get_stock_group(stock_group_id, int(company["id"]))
+    if not group:
+        raise HTTPException(status_code=404, detail="Stock group not found")
+    database.update_stock_group_sync(stock_group_id, int(company["id"]), "queued", None)
+    job = database.create_connector_job(
+        user_id=user_id,
+        company_id=int(company["id"]),
+        agent_id=int(agent["id"]),
+        operation=SYNC_STOCK_ITEMS_FOR_GROUP_OPERATION,
+        payload={
+            "company_name": company["company_name"],
+            "tally_url": company["tally_url"],
+            "stock_group_id": stock_group_id,
+            "group_name": group["name"],
+        },
+    )
+    logger.info("connector.job.created operation=%s user_id=%s company_id=%s agent_id=%s stock_group_id=%s job_id=%s", SYNC_STOCK_ITEMS_FOR_GROUP_OPERATION, user_id, company["id"], agent["id"], stock_group_id, job["id"])
+    return job
 
 
 def authenticate_connector(agent_id: int, token: str | None) -> dict[str, Any]:
@@ -122,6 +146,10 @@ def poll_connector_job(agent_id: int, token: str | None) -> dict[str, Any]:
     job = database.lease_next_connector_job(int(agent["id"]), lease_expires_at)
     if job:
         logger.info("connector.job.leased agent_id=%s job_id=%s operation=%s company_id=%s", agent["id"], job["id"], job["operation"], job.get("company_id"))
+        if job["operation"] == SYNC_STOCK_ITEMS_FOR_GROUP_OPERATION and job.get("company_id"):
+            group_id = (job.get("payload") or {}).get("stock_group_id")
+            if group_id:
+                database.update_stock_group_sync(int(group_id), int(job["company_id"]), "syncing", None)
     return {"job": _public_job(job) if job else None}
 
 
@@ -264,15 +292,17 @@ def get_validate_company_status(user_id: int, job_id: int) -> dict[str, Any]:
 
 def get_master_sync_status(company_id: int) -> dict[str, Any]:
     ledgers_job = database.get_latest_connector_job(company_id, SYNC_LEDGERS_OPERATION)
-    stock_job = database.get_latest_connector_job(company_id, SYNC_STOCK_ITEMS_OPERATION)
+    stock_groups_job = database.get_latest_connector_job(company_id, SYNC_STOCK_GROUPS_OPERATION)
+    legacy_stock_job = database.get_latest_connector_job(company_id, SYNC_STOCK_ITEMS_OPERATION)
+    stock_job = stock_groups_job or legacy_stock_job
     jobs = [job for job in (ledgers_job, stock_job) if job]
     if not jobs:
         return {"status": "not_requested", "message": "Master sync has not been requested.", "jobs": []}
     if any(job["status"] == "failed" for job in jobs):
         return {"status": "failed", "message": "Tally master sync failed.", "jobs": [_public_job(job) for job in jobs]}
     if len(jobs) == 2 and all(job["status"] == "completed" for job in jobs):
-        return {"status": "completed", "message": "Tally masters synced.", "jobs": [_public_job(job) for job in jobs]}
-    return {"status": "syncing", "message": "Syncing Tally masters...", "jobs": [_public_job(job) for job in jobs]}
+        return {"status": "completed", "message": "Tally ledgers and stock groups synced. Stock items continue in the background.", "jobs": [_public_job(job) for job in jobs]}
+    return {"status": "syncing", "message": "Syncing Tally ledgers and stock groups...", "jobs": [_public_job(job) for job in jobs]}
 
 
 def _apply_job_result(job: dict[str, Any]) -> None:
@@ -293,8 +323,14 @@ def _apply_job_result(job: dict[str, Any]) -> None:
             run = database.refresh_commit_run_from_rows(int(job["commit_run_id"]))
             _log_commit_run_progress(run, reason="ledger_failed")
         return
-    if job["status"] == "failed" and job.get("company_id") and job["operation"] in {SYNC_LEDGERS_OPERATION, SYNC_STOCK_ITEMS_OPERATION}:
+    if job["status"] == "failed" and job.get("company_id") and job["operation"] in {SYNC_LEDGERS_OPERATION, SYNC_STOCK_ITEMS_OPERATION, SYNC_STOCK_GROUPS_OPERATION}:
         database.set_company_sync(int(job["company_id"]), "failed", None)
+        return
+    if job["status"] == "failed" and job.get("company_id") and job["operation"] == SYNC_STOCK_ITEMS_FOR_GROUP_OPERATION:
+        payload = job.get("payload") or {}
+        group_id = payload.get("stock_group_id")
+        if group_id:
+            database.update_stock_group_sync(int(group_id), int(job["company_id"]), "failed", job.get("error_message") or "Stock group sync failed")
         return
     if job["status"] != "completed" or not job.get("company_id"):
         return
@@ -309,6 +345,18 @@ def _apply_job_result(job: dict[str, Any]) -> None:
         stock_items = result.get("stock_items") or []
         logger.info("connector.master_apply operation=%s company_id=%s count=%s", job["operation"], company_id, len(stock_items))
         database.replace_stock_items(stock_items, company_id=company_id)
+    elif job["operation"] == SYNC_STOCK_GROUPS_OPERATION:
+        stock_groups = result.get("stock_groups") or []
+        logger.info("connector.master_apply operation=%s company_id=%s count=%s", job["operation"], company_id, len(stock_groups))
+        groups = database.replace_stock_groups(stock_groups, company_id=company_id)
+        _enqueue_stock_item_group_jobs(job, groups)
+    elif job["operation"] == SYNC_STOCK_ITEMS_FOR_GROUP_OPERATION:
+        stock_items = result.get("stock_items") or []
+        group_id = int(payload["stock_group_id"])
+        group_name = str(payload["group_name"])
+        count = database.replace_stock_items_for_group(stock_items, company_id=company_id, stock_group_id=group_id, group_name=group_name)
+        logger.info("connector.master_apply operation=%s company_id=%s stock_group_id=%s group_name=%s count=%s", job["operation"], company_id, group_id, group_name, count)
+        return
     elif job["operation"] == "create_ledger":
         database.upsert_ledger(str(payload["name"]), str(payload["group_name"]), company_id=company_id)
         return
@@ -332,6 +380,34 @@ def _apply_job_result(job: dict[str, Any]) -> None:
         database.set_company_sync(company_id, "success", database.utc_now())
     else:
         database.set_company_sync(company_id, "syncing", None)
+
+
+def _enqueue_stock_item_group_jobs(job: dict[str, Any], groups: list[dict[str, Any]]) -> None:
+    payload = job.get("payload") or {}
+    company_id = int(job["company_id"])
+    queued_count = 0
+    for group in groups:
+        database.update_stock_group_sync(int(group["id"]), company_id, "queued", None, item_count=0)
+        database.create_connector_job(
+            user_id=int(job["user_id"]),
+            company_id=company_id,
+            agent_id=int(job["agent_id"]),
+            operation=SYNC_STOCK_ITEMS_FOR_GROUP_OPERATION,
+            payload={
+                "company_name": payload.get("company_name"),
+                "tally_url": payload.get("tally_url"),
+                "stock_group_id": int(group["id"]),
+                "group_name": group["name"],
+            },
+        )
+        queued_count += 1
+    logger.info(
+        "connector.stock_items_group_jobs.created user_id=%s company_id=%s agent_id=%s group_count=%s",
+        job["user_id"],
+        company_id,
+        job["agent_id"],
+        queued_count,
+    )
 
 
 def _company_agent(user_id: int, company: dict[str, Any]) -> dict[str, Any]:
@@ -383,6 +459,10 @@ def _result_for_persistence(job_id: int, result: dict[str, Any]) -> dict[str, An
     if operation == SYNC_LEDGERS_OPERATION:
         return {"summary": {"ledger_count": len(result.get("ledgers") or [])}}
     if operation == SYNC_STOCK_ITEMS_OPERATION:
+        return {"summary": {"stock_item_count": len(result.get("stock_items") or [])}}
+    if operation == SYNC_STOCK_GROUPS_OPERATION:
+        return {"summary": {"stock_group_count": len(result.get("stock_groups") or [])}}
+    if operation == SYNC_STOCK_ITEMS_FOR_GROUP_OPERATION:
         return {"summary": {"stock_item_count": len(result.get("stock_items") or [])}}
     return result
 

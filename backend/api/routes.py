@@ -17,6 +17,7 @@ from backend.services.company_service import company_has_online_agent, require_c
 from backend.services.connector_job_service import (
     create_list_companies_job,
     create_master_sync_jobs,
+    create_stock_group_retry_job,
     create_tally_health_job,
     create_validate_company_job,
     get_company_tally_health_status,
@@ -514,6 +515,52 @@ def company_stock_items(company_id: int, user: dict[str, Any] = Depends(auth_ser
     }
 
 
+@router.get("/companies/{company_id}/stock-groups")
+def company_stock_groups(company_id: int, user: dict[str, Any] = Depends(auth_service.get_current_user)) -> dict[str, Any]:
+    company = require_company(user["id"], company_id)
+    groups = database.list_stock_groups(company_id)
+    total_items = sum(int(group.get("item_count") or 0) for group in groups)
+    failed_count = sum(1 for group in groups if group.get("sync_status") == "failed")
+    pending_count = sum(1 for group in groups if group.get("sync_status") in {"pending", "queued", "syncing"})
+    return {
+        "company_id": company_id,
+        "company": company["company_name"],
+        "last_sync_at": company.get("last_sync_at"),
+        "last_sync_status": company.get("last_sync_status"),
+        "count": len(groups),
+        "total_items": total_items,
+        "failed_count": failed_count,
+        "pending_count": pending_count,
+        "stock_item_sync_ready": pending_count == 0,
+        "groups": groups,
+    }
+
+
+@router.get("/companies/{company_id}/stock-groups/{stock_group_id}/stock-items")
+def company_stock_group_items(company_id: int, stock_group_id: int, user: dict[str, Any] = Depends(auth_service.get_current_user)) -> dict[str, Any]:
+    company = require_company(user["id"], company_id)
+    group = database.get_stock_group(stock_group_id, company_id)
+    if not group:
+        raise HTTPException(status_code=404, detail="Stock group not found")
+    items = database.list_stock_items_for_group(company_id, stock_group_id)
+    low_stock_count = sum(1 for item in items if _stock_quantity(item.get("closing_balance")) is not None and _stock_quantity(item.get("closing_balance")) <= 5)
+    return {
+        "company_id": company_id,
+        "company": company["company_name"],
+        "group": group,
+        "count": len(items),
+        "low_stock_count": low_stock_count,
+        "items": items,
+    }
+
+
+@router.post("/companies/{company_id}/stock-groups/{stock_group_id}/retry")
+def retry_company_stock_group(company_id: int, stock_group_id: int, user: dict[str, Any] = Depends(auth_service.get_current_user)) -> dict[str, Any]:
+    company = require_company(user["id"], company_id)
+    job = create_stock_group_retry_job(user["id"], company, stock_group_id)
+    return {"job": job, "group": database.get_stock_group(stock_group_id, company_id)}
+
+
 @router.post("/companies/{company_id}/imports/upload")
 async def upload_company_excel(
     company_id: int,
@@ -550,6 +597,14 @@ async def upload_company_excel(
                 sync_state,
             )
             raise HTTPException(status_code=409, detail="Tally master sync is still running. Please try again in a few seconds.")
+        if database.list_stock_groups(company_id) and not database.stock_item_sync_is_terminal(company_id):
+            logger.warning(
+                "import.upload.blocked_pending_stock_items user_id=%s company_id=%s filename=%s",
+                user["id"],
+                company_id,
+                file.filename,
+            )
+            raise HTTPException(status_code=409, detail="Stock items are still syncing in the background. Upload will unlock once all stock groups finish.")
     else:
         agent = _active_tally_agent(user["id"])
         try:

@@ -5,7 +5,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { AppShell, CommitResultView, DashboardView, HistoryDetailView, HistoryView, InventoryView, LoginPanel, PreviewCommitView, UploadView } from "./components";
 import { formatUserError, tallyIsConnected } from "./lib/derivations";
 import { deriveOnboardingState, isCompanySetupComplete, type OnboardingLocalState, type OnboardingStepId } from "./lib/onboarding";
-import type { AppView, CommitRun, CommitSummary, Company, HelperStatus, ImportPreview, ImportRecord, ImportRow, ImportType, MasterSyncStatus, StockItemsResponse, TallyCompanies, TallyStatus, User } from "./lib/types";
+import type { AppView, CommitRun, CommitSummary, Company, HelperStatus, ImportPreview, ImportRecord, ImportRow, ImportType, MasterSyncStatus, StockGroupsResponse, TallyCompanies, TallyStatus, User } from "./lib/types";
 import { OnboardingFlow } from "./onboarding";
 
 const CONFIGURED_API_URL = process.env.NEXT_PUBLIC_API_URL || "";
@@ -42,7 +42,7 @@ export default function Home() {
   const [tallyCompanies, setTallyCompanies] = useState<TallyCompanies>({ available: false, companies: [] });
   const [imports, setImports] = useState<ImportRecord[]>([]);
   const [importDetails, setImportDetails] = useState<Record<number, ImportRow[]>>({});
-  const [stockItems, setStockItems] = useState<StockItemsResponse | null>(null);
+  const [stockGroups, setStockGroups] = useState<StockGroupsResponse | null>(null);
   const [activeView, setActiveView] = useState<AppView>("dashboard");
   const [onboardingActive, setOnboardingActive] = useState(false);
   const [requestedOnboardingStep, setRequestedOnboardingStep] = useState<OnboardingStepId>("welcome");
@@ -123,12 +123,12 @@ export default function Home() {
     if (!activeCompany?.id) {
       setImports([]);
       setImportDetails({});
-      setStockItems(null);
+      setStockGroups(null);
       return;
     }
     void Promise.all([
       loadImports(activeCompany.id),
-      loadStockItems(activeCompany.id),
+      loadStockGroups(activeCompany.id),
       HELPER_SETUP_ENABLED ? loadConnectorStatus(activeCompany.id) : loadTallyStatus(),
     ]);
   }, [activeCompany?.id]);
@@ -189,7 +189,16 @@ export default function Home() {
     if (!shouldShowOnboarding || onboardingState.currentStepId !== "sync" || masterSyncStatus?.status !== "completed") return;
     setRequestedOnboardingStep("ready");
     void loadCompanies();
+    if (activeCompany?.id) void loadStockGroups(activeCompany.id);
   }, [masterSyncStatus?.status, onboardingState.currentStepId, shouldShowOnboarding]);
+
+  useEffect(() => {
+    if (!activeCompany?.id || !stockGroups || stockGroups.pending_count <= 0) return;
+    const interval = window.setInterval(() => {
+      void loadStockGroups(activeCompany.id);
+    }, 3000);
+    return () => window.clearInterval(interval);
+  }, [activeCompany?.id, stockGroups?.pending_count]);
 
   async function api(path: string, init: RequestInit = {}) {
     const sessionToken = getStoredSessionToken();
@@ -273,7 +282,7 @@ export default function Home() {
       setActiveCompanyId(null);
       setImports([]);
       setImportDetails({});
-      setStockItems(null);
+      setStockGroups(null);
       setPreview(null);
       setCommitSummary(null);
       setCommitRun(null);
@@ -463,9 +472,9 @@ export default function Home() {
     }
   }
 
-  async function loadStockItems(companyId: number) {
+  async function loadStockGroups(companyId: number) {
     try {
-      setStockItems(await api(`/companies/${companyId}/stock-items`));
+      setStockGroups(await api(`/companies/${companyId}/stock-groups`));
     } catch (loadError) {
       setError(loadError instanceof Error ? loadError.message : "Unable to load inventory");
     }
@@ -503,7 +512,7 @@ export default function Home() {
       await api(`/companies/${activeCompany.id}/connector/health-check`, { method: "POST", body: JSON.stringify({}) });
       setTallyStatus({ status: "checking", message: "Checking Tally connection...", detail: null });
       await waitForConnectorHealth(activeCompany.id);
-      await Promise.all([loadCompanies(), loadStockItems(activeCompany.id)]);
+      await Promise.all([loadCompanies(), loadStockGroups(activeCompany.id)]);
     } catch (syncError) {
       setError(syncError instanceof Error ? syncError.message : "Inventory sync failed");
     } finally {
@@ -782,11 +791,11 @@ export default function Home() {
           busy={busy}
           selectCompany={selectCompany}
           setActiveView={setActiveView}
-          stockItems={stockItems}
+          stockGroups={stockGroups}
           error={error}
         />
       )}
-      {activeView === "inventory" && <InventoryView stockItems={stockItems} busy={busy} syncInventory={syncInventory} error={error} />}
+      {activeView === "inventory" && <InventoryView stockGroups={stockGroups} activeCompany={activeCompany} api={api} busy={busy} syncInventory={syncInventory} refreshInventory={() => loadStockGroups(activeCompany.id)} error={error} />}
       {activeView === "upload" && (
         <UploadView
           selectedFile={selectedFile}
@@ -795,6 +804,7 @@ export default function Home() {
           setImportType={setImportType}
           processUpload={processUpload}
           tallyStatus={tallyStatus}
+          stockGroups={stockGroups}
           busy={busy}
           error={error}
         />
@@ -810,6 +820,7 @@ export default function Home() {
             setImportType={setImportType}
             processUpload={processUpload}
             tallyStatus={tallyStatus}
+            stockGroups={stockGroups}
             busy={busy}
             error={error}
           />

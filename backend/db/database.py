@@ -102,6 +102,7 @@ def init_db() -> None:
             CREATE TABLE IF NOT EXISTS stock_items (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 company_id INTEGER NOT NULL,
+                stock_group_id INTEGER,
                 name TEXT NOT NULL,
                 group_name TEXT,
                 category TEXT,
@@ -119,6 +120,21 @@ def init_db() -> None:
                 hsn_description TEXT,
                 taxability TEXT,
                 raw_json TEXT,
+                FOREIGN KEY (company_id) REFERENCES companies(id) ON DELETE CASCADE,
+                FOREIGN KEY (stock_group_id) REFERENCES stock_groups(id) ON DELETE SET NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS stock_groups (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                company_id INTEGER NOT NULL,
+                name TEXT NOT NULL,
+                parent_name TEXT,
+                item_count INTEGER NOT NULL DEFAULT 0,
+                sync_status TEXT NOT NULL DEFAULT 'pending',
+                sync_error TEXT,
+                last_synced_at TEXT,
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                 FOREIGN KEY (company_id) REFERENCES companies(id) ON DELETE CASCADE
             );
 
@@ -255,6 +271,12 @@ def init_db() -> None:
             CREATE UNIQUE INDEX IF NOT EXISTS idx_stock_items_company_name
             ON stock_items(company_id, lower(name));
 
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_stock_groups_company_name
+            ON stock_groups(company_id, lower(name));
+
+            CREATE INDEX IF NOT EXISTS idx_stock_items_company_group
+            ON stock_items(company_id, stock_group_id, name);
+
             CREATE UNIQUE INDEX IF NOT EXISTS idx_ledgers_company_name
             ON ledgers(company_id, lower(name));
 
@@ -305,6 +327,7 @@ def _migrate_existing_tables(connection: sqlite3.Connection) -> None:
         ("local_agents", "last_error", "TEXT"),
         ("local_agents", "setup_expires_at", "TEXT"),
         ("stock_items", "group_name", "TEXT"),
+        ("stock_items", "stock_group_id", "INTEGER"),
         ("stock_items", "category", "TEXT"),
         ("stock_items", "base_unit", "TEXT"),
         ("stock_items", "additional_unit", "TEXT"),
@@ -376,6 +399,7 @@ def _migrate_master_table_uniqueness(connection: sqlite3.Connection) -> None:
                 CREATE TABLE stock_items (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     company_id INTEGER NOT NULL,
+                    stock_group_id INTEGER,
                     name TEXT NOT NULL,
                     group_name TEXT,
                     category TEXT,
@@ -523,6 +547,7 @@ def _delete_user_data_by_ids(connection: sqlite3.Connection, user_ids: list[int]
         delete_where("commit_runs", f"company_id IN ({company_placeholders})", company_ids)
         delete_where("import_rows", f"company_id IN ({company_placeholders})", company_ids)
         delete_where("stock_items", f"company_id IN ({company_placeholders})", company_ids)
+        delete_where("stock_groups", f"company_id IN ({company_placeholders})", company_ids)
         delete_where("ledgers", f"company_id IN ({company_placeholders})", company_ids)
     if import_ids:
         import_placeholders = ",".join("?" for _ in import_ids)
@@ -1099,33 +1124,174 @@ def _decode_connector_job(job: dict[str, Any]) -> dict[str, Any]:
     return job
 
 
-def replace_stock_items(items: Iterable[str | dict[str, Any]], company_id: int | None = None) -> None:
-    company_id = company_id or ensure_legacy_company()["id"]
-    stock_items = []
+def replace_stock_groups(groups: Iterable[str | dict[str, Any]], company_id: int) -> list[dict[str, Any]]:
+    normalized_groups = []
     seen = set()
-    for item in items:
-        normalized = _normalize_stock_item(item)
+    for group in groups:
+        normalized = _normalize_stock_group(group)
         name = normalized.get("name")
         if not name or name.lower() in seen:
             continue
         seen.add(name.lower())
-        stock_items.append(normalized)
-    stock_items.sort(key=lambda item: item["name"].lower())
+        normalized_groups.append(normalized)
+    normalized_groups.sort(key=lambda item: item["name"].lower())
+    now = utc_now()
+    with get_connection() as connection:
+        connection.execute("DELETE FROM stock_items WHERE company_id = ?", (company_id,))
+        connection.execute("DELETE FROM stock_groups WHERE company_id = ?", (company_id,))
+        connection.executemany(
+            """
+            INSERT INTO stock_groups (
+                company_id, name, parent_name, item_count, sync_status,
+                sync_error, last_synced_at, created_at, updated_at
+            )
+            VALUES (?, ?, ?, 0, 'pending', NULL, NULL, ?, ?)
+            """,
+            [(company_id, item["name"], item.get("parent_name"), now, now) for item in normalized_groups],
+        )
+    return list_stock_groups(company_id)
+
+
+def list_stock_groups(company_id: int) -> list[dict[str, Any]]:
+    with get_connection() as connection:
+        return [
+            dict(row)
+            for row in connection.execute(
+                """
+                SELECT * FROM stock_groups
+                WHERE company_id = ?
+                ORDER BY lower(name)
+                """,
+                (company_id,),
+            )
+        ]
+
+
+def get_stock_group(group_id: int, company_id: int) -> dict[str, Any] | None:
+    with get_connection() as connection:
+        row = connection.execute(
+            "SELECT * FROM stock_groups WHERE id = ? AND company_id = ?",
+            (group_id, company_id),
+        ).fetchone()
+        return dict(row) if row else None
+
+
+def get_stock_group_by_name(name: str, company_id: int) -> dict[str, Any] | None:
+    with get_connection() as connection:
+        row = connection.execute(
+            "SELECT * FROM stock_groups WHERE company_id = ? AND lower(name) = lower(?)",
+            (company_id, name),
+        ).fetchone()
+        return dict(row) if row else None
+
+
+def update_stock_group_sync(
+    group_id: int,
+    company_id: int,
+    status: str,
+    error: str | None = None,
+    item_count: int | None = None,
+    synced_at: str | None = None,
+) -> None:
+    updates = ["sync_status = ?", "sync_error = ?", "updated_at = ?"]
+    values: list[Any] = [status, error, utc_now()]
+    if item_count is not None:
+        updates.append("item_count = ?")
+        values.append(item_count)
+    if synced_at is not None:
+        updates.append("last_synced_at = ?")
+        values.append(synced_at)
+    values.extend([group_id, company_id])
+    with get_connection() as connection:
+        connection.execute(
+            f"UPDATE stock_groups SET {', '.join(updates)} WHERE id = ? AND company_id = ?",
+            values,
+        )
+
+
+def stock_item_sync_is_terminal(company_id: int) -> bool:
+    groups = list_stock_groups(company_id)
+    return bool(groups) and all(group.get("sync_status") in {"completed", "failed"} for group in groups)
+
+
+def stock_item_sync_has_failures(company_id: int) -> bool:
+    return any(group.get("sync_status") == "failed" for group in list_stock_groups(company_id))
+
+
+def replace_stock_items_for_group(items: Iterable[str | dict[str, Any]], company_id: int, stock_group_id: int, group_name: str) -> int:
+    stock_items = _dedupe_stock_items(items, default_group_name=group_name)
+    now = utc_now()
+    with get_connection() as connection:
+        connection.execute(
+            "DELETE FROM stock_items WHERE company_id = ? AND stock_group_id = ?",
+            (company_id, stock_group_id),
+        )
+        connection.executemany(
+            """
+            INSERT OR IGNORE INTO stock_items (
+                company_id, stock_group_id, name, group_name, category, base_unit, additional_unit,
+                opening_balance, closing_balance, opening_value, closing_value,
+                opening_rate, closing_rate, gst_type, gst_rate, hsn_code,
+                hsn_description, taxability, raw_json
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            [
+                (
+                    company_id,
+                    stock_group_id,
+                    item["name"],
+                    item.get("group_name") or group_name,
+                    item.get("category"),
+                    item.get("base_unit"),
+                    item.get("additional_unit"),
+                    item.get("opening_balance"),
+                    item.get("closing_balance"),
+                    item.get("opening_value"),
+                    item.get("closing_value"),
+                    item.get("opening_rate"),
+                    item.get("closing_rate"),
+                    item.get("gst_type"),
+                    item.get("gst_rate"),
+                    item.get("hsn_code"),
+                    item.get("hsn_description"),
+                    item.get("taxability"),
+                    None,
+                )
+                for item in stock_items
+            ],
+        )
+        connection.execute(
+            """
+            UPDATE stock_groups
+            SET item_count = ?, sync_status = 'completed', sync_error = NULL,
+                last_synced_at = ?, updated_at = ?
+            WHERE id = ? AND company_id = ?
+            """,
+            (len(stock_items), now, now, stock_group_id, company_id),
+        )
+    return len(stock_items)
+
+
+def replace_stock_items(items: Iterable[str | dict[str, Any]], company_id: int | None = None) -> None:
+    company_id = company_id or ensure_legacy_company()["id"]
+    stock_items = _dedupe_stock_items(items)
     with get_connection() as connection:
         connection.execute("DELETE FROM stock_items WHERE company_id = ?", (company_id,))
         connection.executemany(
             """
             INSERT OR IGNORE INTO stock_items (
-                company_id, name, group_name, category, base_unit, additional_unit,
+                company_id, stock_group_id, name, group_name, category, base_unit, additional_unit,
                 opening_balance, closing_balance, opening_value, closing_value,
                 opening_rate, closing_rate, gst_type, gst_rate, hsn_code,
                 hsn_description, taxability, raw_json
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             [
                 (
                     company_id,
+                    None,
                     item["name"],
                     item.get("group_name"),
                     item.get("category"),
@@ -1147,6 +1313,30 @@ def replace_stock_items(items: Iterable[str | dict[str, Any]], company_id: int |
                 for item in stock_items
             ],
         )
+
+
+def _dedupe_stock_items(items: Iterable[str | dict[str, Any]], default_group_name: str | None = None) -> list[dict[str, Any]]:
+    stock_items = []
+    seen = set()
+    for item in items:
+        normalized = _normalize_stock_item(item)
+        if default_group_name and not normalized.get("group_name"):
+            normalized["group_name"] = default_group_name
+        name = normalized.get("name")
+        if not name or name.lower() in seen:
+            continue
+        seen.add(name.lower())
+        stock_items.append(normalized)
+    stock_items.sort(key=lambda item: item["name"].lower())
+    return stock_items
+
+
+def _normalize_stock_group(group: str | dict[str, Any]) -> dict[str, Any]:
+    if isinstance(group, str):
+        return {"name": group.strip(), "parent_name": None}
+    name = str(group.get("name") or group.get("Name") or "").strip()
+    parent = _clean_optional(group.get("parent_name") or group.get("parent") or group.get("Parent"))
+    return {"name": name, "parent_name": parent}
 
 
 def _normalize_stock_item(item: str | dict[str, Any]) -> dict[str, Any]:
@@ -1246,6 +1436,21 @@ def list_stock_items(company_id: int | None = None) -> list[dict[str, Any]]:
             for row in connection.execute(
                 "SELECT * FROM stock_items WHERE company_id = ? ORDER BY name",
                 (company_id,),
+            )
+        ]
+
+
+def list_stock_items_for_group(company_id: int, stock_group_id: int) -> list[dict[str, Any]]:
+    with get_connection() as connection:
+        return [
+            _decode_stock_item(row)
+            for row in connection.execute(
+                """
+                SELECT * FROM stock_items
+                WHERE company_id = ? AND stock_group_id = ?
+                ORDER BY name
+                """,
+                (company_id, stock_group_id),
             )
         ]
 
