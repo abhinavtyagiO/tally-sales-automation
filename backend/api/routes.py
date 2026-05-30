@@ -417,6 +417,19 @@ def support_delete_user_data(
     return result
 
 
+@router.post("/support/delete-my-data")
+def support_delete_my_data(user: dict[str, Any] = Depends(auth_service.get_current_user)) -> dict[str, Any]:
+    result = database.delete_user_data(int(user["id"]))
+    logger.warning(
+        "support.delete_my_data.completed user_id=%s email=%s deleted=%s counts=%s",
+        user["id"],
+        user.get("email"),
+        result["deleted"],
+        result.get("counts"),
+    )
+    return result
+
+
 @router.post("/companies/{company_id}/agents/{agent_id}/revoke")
 def revoke_agent(
     company_id: int,

@@ -260,6 +260,18 @@ class Parent2FlowTests(unittest.TestCase):
             self.assertEqual(connection.execute("SELECT COUNT(*) AS count FROM stock_items WHERE company_id = ?", (company["id"],)).fetchone()["count"], 0)
             self.assertEqual(connection.execute("SELECT COUNT(*) AS count FROM ledgers WHERE company_id = ?", (company["id"],)).fetchone()["count"], 0)
 
+    def test_support_delete_my_data_removes_authenticated_user_without_admin_token(self) -> None:
+        company = self.make_company()
+        self.seed_company_masters(company)
+
+        result = routes.support_delete_my_data(user=self.user)
+
+        self.assertTrue(result["deleted"])
+        self.assertEqual(result["counts"]["users"], 1)
+        self.assertIsNone(database.get_user(self.user["id"]))
+        self.assertIsNotNone(database.get_user(self.other_user["id"]))
+        self.assertEqual(database.list_companies(self.user["id"]), [])
+
     def test_company_scoped_masters_allow_same_names(self) -> None:
         first = self.make_company(company_name="Company A")
         second = self.make_company(company_name="Company B")
