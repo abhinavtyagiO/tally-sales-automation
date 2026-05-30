@@ -252,7 +252,7 @@ export function OnboardingFlow({
           )}
 
           {state.currentStepId === "sync" && (
-            <OnboardingScreen eyebrow="Sync Tally Data" title="Syncing ledgers and stock items" description="AccountPilot is preparing your Tally masters for Excel validation and voucher creation.">
+            <OnboardingScreen eyebrow="Sync Tally Data" title="Syncing ledgers and stock groups" description="AccountPilot is preparing the core Tally masters. Stock items will continue syncing by group in the background.">
               <div className="sync-panel">
                 <Loader2 size={34} className={syncStatus?.status === "failed" ? "" : "spin"} />
                 <div>
@@ -262,19 +262,19 @@ export function OnboardingFlow({
               </div>
               <div className="onboarding-checklist">
                 <ChecklistRow done={syncStatus?.status === "completed"} loading={syncStatus?.status === "syncing"} label="Ledgers synced" />
-                <ChecklistRow done={syncStatus?.status === "completed"} loading={syncStatus?.status === "syncing"} label="Stock items synced" />
+                <ChecklistRow done={syncStatus?.status === "completed"} loading={syncStatus?.status === "syncing"} label="Stock groups synced" />
               </div>
               <FooterActions secondaryLabel="Retry sync" secondaryIcon={<RefreshCw size={18} />} onSecondary={retrySync} primaryLabel="Continue" primaryDisabled={!state.syncReady} onPrimary={goToDashboard} busy={busy} />
             </OnboardingScreen>
           )}
 
           {state.currentStepId === "ready" && (
-            <OnboardingScreen eyebrow="Ready" title="AccountPilot is ready" description="Your Tally connection, company details, ledgers, and stock items are ready for Excel uploads.">
+            <OnboardingScreen eyebrow="Ready" title="AccountPilot is ready" description="Your Tally connection, company details, ledgers, and stock groups are ready. Stock items continue syncing by group for Excel uploads.">
               <div className="ready-grid">
                 <ReadyItem icon={<PlugZap size={20} />} label="Tally connected" />
                 <ReadyItem icon={<Building2 size={20} />} label="Company selected" />
                 <ReadyItem icon={<ClipboardCheck size={20} />} label="Ledgers synced" />
-                <ReadyItem icon={<FileSpreadsheet size={20} />} label="Stock items synced" />
+                <ReadyItem icon={<FileSpreadsheet size={20} />} label="Stock groups synced" />
               </div>
               <FooterActions
                 secondaryLabel="Upload first Excel file"

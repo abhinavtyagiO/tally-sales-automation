@@ -53,7 +53,7 @@ def build_vouchers(
                 {
                     "row": index,
                     "product_name": product_name,
-                    "error": "Product not found in synced Tally stock items",
+                    "error": _missing_stock_item_error(company_id),
                 }
             )
             continue
@@ -91,6 +91,12 @@ def _resolve_sales_ledger(company: dict[str, Any] | None = None) -> str | None:
 def _sales_ledger_error(company: dict[str, Any] | None = None) -> str:
     sales_ledger_name = _company_value(company, "sales_ledger_name", config.SALES_LEDGER_NAME)
     return f'Required sales ledger "{sales_ledger_name}" not found in cache'
+
+
+def _missing_stock_item_error(company_id: int) -> str:
+    if database.stock_item_sync_has_failures(company_id):
+        return "Product not found in synced Tally stock items. Some stock groups need retry, so retry failed groups if this product exists in Tally."
+    return "Product not found in synced Tally stock items"
 
 
 def _resolve_party_ledger(payment_mode: str, ensure_ledgers: bool, company: dict[str, Any] | None = None) -> str:

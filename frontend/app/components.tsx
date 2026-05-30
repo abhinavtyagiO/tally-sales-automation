@@ -35,7 +35,7 @@ import {
   tallyIsConnected,
   tallyIsChecking,
 } from "./lib/derivations";
-import type { AppView, CommitRun, CommitSummary, Company, HelperStatus, ImportPreview, ImportRecord, ImportRow, ImportType, StockItem, StockItemsResponse, TallyCompanies, TallyStatus, User } from "./lib/types";
+import type { AppView, CommitRun, CommitSummary, Company, HelperStatus, ImportPreview, ImportRecord, ImportRow, ImportType, StockGroup, StockGroupItemsResponse, StockGroupsResponse, StockItem, TallyCompanies, TallyStatus, User } from "./lib/types";
 
 type ImportDetails = Record<number, ImportRow[]>;
 
@@ -380,7 +380,7 @@ export function DashboardView({
   busy,
   selectCompany,
   setActiveView,
-  stockItems,
+  stockGroups,
   error,
 }: {
   activeCompany: Company;
@@ -391,7 +391,7 @@ export function DashboardView({
   busy: boolean;
   selectCompany: (companyId: number) => void;
   setActiveView: (view: AppView) => void;
-  stockItems: StockItemsResponse | null;
+  stockGroups: StockGroupsResponse | null;
   error: string;
 }) {
   const vouchersCreated = countCommittedVouchers(importDetails);
@@ -437,7 +437,7 @@ export function DashboardView({
           <button className="action-card" onClick={() => setActiveView("inventory")}>
             <Package size={22} />
             <strong>Inventory</strong>
-            <span>{formatNumber(stockItems?.count || 0)} synced stock items.</span>
+            <span>{formatNumber(stockGroups?.total_items || 0)} synced stock items across {formatNumber(stockGroups?.count || 0)} groups.</span>
           </button>
           <MetricCard label="Vouchers Created" value={formatNumber(vouchersCreated)} />
           <MetricCard label="Imports Processed" value={formatNumber(imports.length)} />
@@ -449,29 +449,55 @@ export function DashboardView({
 }
 
 export function InventoryView({
-  stockItems,
+  stockGroups,
+  activeCompany,
+  api,
   busy,
   syncInventory,
+  refreshInventory,
   error,
 }: {
-  stockItems: StockItemsResponse | null;
+  stockGroups: StockGroupsResponse | null;
+  activeCompany: Company;
+  api: (path: string, init?: RequestInit) => Promise<any>;
   busy: boolean;
-  syncInventory: () => void;
+  syncInventory: () => Promise<void>;
+  refreshInventory: () => Promise<void>;
   error: string;
 }) {
   const [query, setQuery] = useState("");
-  const [group, setGroup] = useState("");
-  const [category, setCategory] = useState("");
-  const items = stockItems?.items || [];
-  const filteredItems = useMemo(
+  const [selectedGroup, setSelectedGroup] = useState<StockGroup | null>(null);
+  const [groupItems, setGroupItems] = useState<StockGroupItemsResponse | null>(null);
+  const [loadingGroupId, setLoadingGroupId] = useState<number | null>(null);
+  const groups = stockGroups?.groups || [];
+  const filteredGroups = useMemo(
     () =>
-      items.filter((item) => {
-        const searchText = `${item.name} ${item.group_name || ""} ${item.category || ""} ${item.base_unit || ""}`.toLowerCase();
-        return searchText.includes(query.trim().toLowerCase()) && (!group || item.group_name === group) && (!category || item.category === category);
+      groups.filter((group) => {
+        const searchText = `${group.name} ${group.parent_name || ""}`.toLowerCase();
+        return searchText.includes(query.trim().toLowerCase());
       }),
-    [items, query, group, category],
+    [groups, query],
   );
-  const inventoryValue = items.reduce((total, item) => total + (parseStockNumber(item.closing_value) || 0), 0);
+
+  async function openGroup(group: StockGroup) {
+    setSelectedGroup(group);
+    setLoadingGroupId(group.id);
+    try {
+      setGroupItems(await api(`/companies/${activeCompany.id}/stock-groups/${group.id}/stock-items`));
+    } finally {
+      setLoadingGroupId(null);
+    }
+  }
+
+  async function retryGroup(group: StockGroup) {
+    setLoadingGroupId(group.id);
+    try {
+      await api(`/companies/${activeCompany.id}/stock-groups/${group.id}/retry`, { method: "POST", body: JSON.stringify({}) });
+      await refreshInventory();
+    } finally {
+      setLoadingGroupId(null);
+    }
+  }
 
   return (
     <div className="stack">
@@ -486,44 +512,43 @@ export function InventoryView({
       </div>
       {error && <p className="alert error-alert">{error}</p>}
       <div className="stats-grid">
-        <MetricCard label="Stock Items" value={formatNumber(stockItems?.count || 0)} />
-        <MetricCard label="Low Stock Items" value={formatNumber(stockItems?.low_stock_count || 0)} tone={stockItems?.low_stock_count ? "error" : "success"} />
-        <MetricCard label="Closing Value" value={inventoryValue ? formatCurrency(inventoryValue) : "-"} />
+        <MetricCard label="Stock Groups" value={formatNumber(stockGroups?.count || 0)} />
+        <MetricCard label="Stock Items" value={formatNumber(stockGroups?.total_items || 0)} />
+        <MetricCard label="Groups Needing Retry" value={formatNumber(stockGroups?.failed_count || 0)} tone={stockGroups?.failed_count ? "error" : "success"} />
       </div>
       <section className="card inventory-card">
         <div className="inventory-toolbar">
           <label className="search-box">
             <Search size={18} />
-            <input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search stock" />
+            <input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search stock groups" />
           </label>
-          <select value={group} onChange={(event) => setGroup(event.target.value)}>
-            <option value="">All Groups</option>
-            {(stockItems?.groups || []).map((name) => (
-              <option key={name} value={name}>
-                {name}
-              </option>
-            ))}
-          </select>
-          <select value={category} onChange={(event) => setCategory(event.target.value)}>
-            <option value="">All Categories</option>
-            {(stockItems?.categories || []).map((name) => (
-              <option key={name} value={name}>
-                {name}
-              </option>
-            ))}
-          </select>
-          {(query || group || category) && (
-            <button className="ghost-button" onClick={() => { setQuery(""); setGroup(""); setCategory(""); }}>
+          {query && (
+            <button className="ghost-button" onClick={() => setQuery("")}>
               Clear Filters
             </button>
           )}
         </div>
-        <InventoryTable items={filteredItems} />
+        <StockGroupsTable groups={filteredGroups} loadingGroupId={loadingGroupId} openGroup={openGroup} retryGroup={retryGroup} />
         <div className="table-footer">
-          Showing {formatNumber(filteredItems.length)} of {formatNumber(items.length)} items
-          {stockItems?.last_sync_at && <span>Last synced: {formatDateTime(stockItems.last_sync_at)}</span>}
+          Showing {formatNumber(filteredGroups.length)} of {formatNumber(groups.length)} groups
+          {stockGroups?.last_sync_at && <span>Last synced: {formatDateTime(stockGroups.last_sync_at)}</span>}
         </div>
       </section>
+      {selectedGroup && (
+        <section className="card inventory-card">
+          <div className="page-intro with-actions compact-intro">
+            <div>
+              <p className="eyebrow">Stock Group</p>
+              <h3>{selectedGroup.name}</h3>
+            </div>
+            <button className="ghost-button" onClick={() => { setSelectedGroup(null); setGroupItems(null); }}>
+              Close
+            </button>
+          </div>
+          {loadingGroupId === selectedGroup.id && !groupItems ? <p className="muted">Loading stock items...</p> : <InventoryTable items={groupItems?.items || []} />}
+          <div className="table-footer">Showing {formatNumber(groupItems?.items.length || 0)} items</div>
+        </section>
+      )}
     </div>
   );
 }
@@ -535,6 +560,7 @@ export function UploadView({
   setImportType,
   processUpload,
   tallyStatus,
+  stockGroups,
   busy,
   error,
 }: {
@@ -544,10 +570,12 @@ export function UploadView({
   setImportType: (value: ImportType) => void;
   processUpload: () => void;
   tallyStatus: TallyStatus | null;
+  stockGroups: StockGroupsResponse | null;
   busy: boolean;
   error: string;
 }) {
   const connected = tallyIsConnected(tallyStatus);
+  const stockSyncReady = Boolean(stockGroups?.stock_item_sync_ready);
   const isGst = importType === "gst_tax_invoice";
   const guidelines = isGst
     ? [
@@ -620,11 +648,12 @@ export function UploadView({
           <h3>Tally Status</h3>
           <TallyConnection status={tallyStatus} />
           {!connected && <p className="alert warning-alert">You can choose a file, but processing needs a live Tally connection.</p>}
+          {connected && !stockSyncReady && <p className="alert warning-alert">Stock items are still syncing by group. Upload will unlock when the background sync finishes.</p>}
         </section>
       </aside>
       <footer className="sticky-actions">
         {error && <p className="alert error-alert">{error}</p>}
-        <button className="primary-button" onClick={processUpload} disabled={busy || !selectedFile || !connected}>
+        <button className="primary-button" onClick={processUpload} disabled={busy || !selectedFile || !connected || !stockSyncReady}>
           {busy ? "Processing..." : "Validate Excel"}
           <ChevronRight size={18} />
         </button>
@@ -920,6 +949,67 @@ function RecentActivity({ imports, importDetails, setActiveView }: { imports: Im
     </section>
   );
 }
+
+function StockGroupsTable({
+  groups,
+  loadingGroupId,
+  openGroup,
+  retryGroup,
+}: {
+  groups: StockGroup[];
+  loadingGroupId: number | null;
+  openGroup: (group: StockGroup) => void;
+  retryGroup: (group: StockGroup) => void;
+}) {
+  return (
+    <div className="table-wrap inventory-table">
+      <table>
+        <thead>
+          <tr>
+            <th>Stock Group</th>
+            <th>Parent</th>
+            <th>Items</th>
+            <th>Last Synced</th>
+            <th></th>
+          </tr>
+        </thead>
+        <tbody>
+          {groups.map((group) => {
+            const failed = group.sync_status === "failed";
+            return (
+              <tr key={group.id} className={failed ? "warning-row" : ""}>
+                <td>
+                  <strong>{group.name}</strong>
+                  {failed && group.sync_error ? <p className="muted">{group.sync_error}</p> : null}
+                </td>
+                <td>{group.parent_name || "-"}</td>
+                <td>{formatNumber(group.item_count || 0)}</td>
+                <td>{group.last_synced_at ? formatDateTime(group.last_synced_at) : "-"}</td>
+                <td>
+                  {failed ? (
+                    <button className="ghost-button" onClick={() => retryGroup(group)} disabled={loadingGroupId === group.id}>
+                      <RefreshCw size={16} /> Retry
+                    </button>
+                  ) : (
+                    <button className="link-button" onClick={() => openGroup(group)} disabled={loadingGroupId === group.id || group.sync_status !== "completed"}>
+                      View <ChevronRight size={16} />
+                    </button>
+                  )}
+                </td>
+              </tr>
+            );
+          })}
+          {!groups.length && (
+            <tr>
+              <td colSpan={5}>No stock groups found. Sync inventory after Tally is connected.</td>
+            </tr>
+          )}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
 
 function InventoryTable({ items }: { items: StockItem[] }) {
   return (

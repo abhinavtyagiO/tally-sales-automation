@@ -85,6 +85,8 @@ def build_gst_invoice(row: dict[str, Any], company: dict[str, Any], index: int =
 
     stock_item = database.get_stock_item_by_name(product_name, company_id=company["id"])
     if not stock_item:
+        if database.stock_item_sync_has_failures(company["id"]):
+            raise GstInvoiceError("Product not found in synced Tally stock items. Some stock groups need retry, so retry failed groups if this product exists in Tally.")
         raise GstInvoiceError("Product not found in synced Tally stock items")
     stock = dict(stock_item)
     gst_rate = _positive_or_zero(stock.get("gst_rate"), "GST rate")

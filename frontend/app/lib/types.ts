@@ -103,6 +103,30 @@ export type StockItem = {
   raw?: unknown;
 };
 
+export type StockGroup = {
+  id: number;
+  company_id: number;
+  name: string;
+  parent_name?: string | null;
+  item_count: number;
+  sync_status?: string | null;
+  sync_error?: string | null;
+  last_synced_at?: string | null;
+};
+
+export type StockGroupsResponse = {
+  company_id: number;
+  company: string;
+  last_sync_at?: string | null;
+  last_sync_status?: string | null;
+  count: number;
+  total_items: number;
+  failed_count: number;
+  pending_count: number;
+  stock_item_sync_ready: boolean;
+  groups: StockGroup[];
+};
+
 export type StockItemsResponse = {
   company_id: number;
   company: string;
@@ -111,6 +135,15 @@ export type StockItemsResponse = {
   count: number;
   groups: string[];
   categories: string[];
+  low_stock_count: number;
+  items: StockItem[];
+};
+
+export type StockGroupItemsResponse = {
+  company_id: number;
+  company: string;
+  group: StockGroup;
+  count: number;
   low_stock_count: number;
   items: StockItem[];
 };
