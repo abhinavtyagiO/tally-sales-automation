@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import date
 import logging
+import secrets
 import sqlite3
 import time
 from typing import Any, Optional
@@ -136,6 +137,11 @@ class ConnectorRegisterRequest(BaseModel):
 class ConnectorValidateCompanyRequest(BaseModel):
     company_name: str
     tally_url: str = config.TALLY_URL
+
+
+class SupportDeleteUserDataRequest(BaseModel):
+    email: str
+    confirm_email: str
 
 
 class SaleRow(BaseModel):
@@ -388,6 +394,27 @@ def connector_job_result(
         request.result,
         request.error_message,
     )
+
+
+@router.post("/support/delete-user-data")
+def support_delete_user_data(
+    request: SupportDeleteUserDataRequest,
+    x_accountpilot_support_token: Optional[str] = Header(default=None),
+) -> dict[str, Any]:
+    _require_support_admin_token(x_accountpilot_support_token)
+    email = request.email.strip().lower()
+    confirm_email = request.confirm_email.strip().lower()
+    if not email or email != confirm_email:
+        raise HTTPException(status_code=400, detail="Email confirmation does not match")
+    result = database.delete_user_data_by_email(email)
+    logger.warning(
+        "support.delete_user_data.completed email=%s deleted=%s user_ids=%s counts=%s",
+        email,
+        result["deleted"],
+        result.get("user_ids"),
+        result.get("counts"),
+    )
+    return result
 
 
 @router.post("/companies/{company_id}/agents/{agent_id}/revoke")
@@ -1213,6 +1240,14 @@ def _friendly_tally_exception(exc: TallyError) -> HTTPException:
             detail="Can't connect to Tally right now. Please try again or contact support.",
         )
     return HTTPException(status_code=502, detail="Tally action failed. Please try again or contact support.")
+
+
+def _require_support_admin_token(token: str | None) -> None:
+    expected = config.SUPPORT_ADMIN_TOKEN
+    if not expected:
+        raise HTTPException(status_code=404, detail="Support cleanup is not configured")
+    if not token or not secrets.compare_digest(token, expected):
+        raise HTTPException(status_code=401, detail="Invalid support token")
 
 
 def _stock_quantity(value: Any) -> float | None:
