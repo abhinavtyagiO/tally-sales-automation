@@ -1059,7 +1059,7 @@ def replace_stock_items(items: Iterable[str | dict[str, Any]], company_id: int |
                     item.get("hsn_code"),
                     item.get("hsn_description"),
                     item.get("taxability"),
-                    json.dumps(item.get("raw")) if item.get("raw") is not None else None,
+                    None,
                 )
                 for item in stock_items
             ],
@@ -1087,7 +1087,6 @@ def _normalize_stock_item(item: str | dict[str, Any]) -> dict[str, Any]:
         "hsn_code": _clean_optional(item.get("hsn_code") or item.get("hsnCode") or item.get("GSTHSNName") or item.get("GSTHSNSACCode") or item.get("HSNCode")),
         "hsn_description": _clean_optional(item.get("hsn_description") or item.get("hsnDescription") or item.get("GSTHSNDescription")),
         "taxability": _clean_optional(item.get("taxability") or item.get("GSTOVRDNTaxability") or item.get("Taxability")),
-        "raw": item.get("raw") or item.get("Raw") or item,
     }
 
 
@@ -1170,11 +1169,7 @@ def list_stock_items(company_id: int | None = None) -> list[dict[str, Any]]:
 
 def _decode_stock_item(row: sqlite3.Row) -> dict[str, Any]:
     item = dict(row)
-    raw_json = item.pop("raw_json", None)
-    try:
-        item["raw"] = json.loads(raw_json) if raw_json else None
-    except json.JSONDecodeError:
-        item["raw"] = None
+    item.pop("raw_json", None)
     return item
 
 

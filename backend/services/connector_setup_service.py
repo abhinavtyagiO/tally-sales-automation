@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
+import logging
 from typing import Any
 
 from fastapi import HTTPException
@@ -11,6 +12,7 @@ from backend.services.auth_service import hash_token
 
 SETUP_TOKEN_TTL_MINUTES = 15
 STALE_AFTER_MINUTES = 5
+logger = logging.getLogger(__name__)
 
 
 def create_setup_session(user_id: int) -> dict[str, Any]:
@@ -24,6 +26,7 @@ def create_setup_session(user_id: int) -> dict[str, Any]:
         auth_token=agent_auth_token,
         setup_expires_at=expires_at,
     )
+    logger.info("connector.setup_session.created user_id=%s agent_id=%s expires_at=%s", user_id, agent["id"], expires_at)
     return {
         "setup_token": setup_token,
         "expires_at": expires_at,
@@ -34,21 +37,28 @@ def create_setup_session(user_id: int) -> dict[str, Any]:
 def register_helper(setup_token: str, device_name: str | None = None) -> dict[str, Any]:
     agent = database.pair_local_agent(hash_token(setup_token), device_name=device_name or "AccountPilot Helper")
     if not agent:
+        logger.warning("connector.register.failed reason=invalid_or_expired_setup_session")
         raise HTTPException(status_code=404, detail="Invalid or expired setup session")
     token = agent.get("auth_token")
     if not token:
+        logger.warning("connector.register.failed user_id=%s agent_id=%s reason=missing_agent_auth_token", agent.get("user_id"), agent.get("id"))
         raise HTTPException(status_code=400, detail="Connector credentials are unavailable")
+    logger.info("connector.register.success user_id=%s agent_id=%s device_name=%s", agent.get("user_id"), agent.get("id"), agent.get("device_name"))
     return {"agent": _public_agent(agent), "agent_auth_token": token}
 
 
 def get_helper_detection_status(user_id: int) -> dict[str, Any]:
     agent = database.get_latest_local_agent(user_id)
     if not agent:
+        logger.info("connector.status user_id=%s status=helper_required agent_id=None", user_id)
         return {"status": "helper_required", "message": "Install AccountPilot Helper to connect with Tally.", "agent": None}
     if agent.get("pairing_status") != "paired":
+        logger.info("connector.status user_id=%s status=waiting_for_helper agent_id=%s", user_id, agent.get("id"))
         return {"status": "waiting_for_helper", "message": "Waiting for AccountPilot Helper to finish setup.", "agent": _public_agent(agent)}
     if _is_stale(agent.get("last_seen_at")):
+        logger.info("connector.status user_id=%s status=stale agent_id=%s last_seen_at=%s", user_id, agent.get("id"), agent.get("last_seen_at"))
         return {"status": "stale", "message": "AccountPilot Helper has not checked in recently.", "agent": _public_agent(agent)}
+    logger.info("connector.status user_id=%s status=connected agent_id=%s last_seen_at=%s", user_id, agent.get("id"), agent.get("last_seen_at"))
     return {"status": "connected", "message": "AccountPilot Helper is connected.", "agent": _public_agent(agent)}
 
 

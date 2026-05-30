@@ -588,6 +588,8 @@ class Parent2FlowTests(unittest.TestCase):
             ),
             x_accountpilot_agent_token="agent-secret",
         )
+        stored_ledgers_job = database.get_connector_job(ledgers_job["id"])
+        self.assertEqual(stored_ledgers_job["result"], {"summary": {"ledger_count": 2}})
         self.assertEqual(len(database.list_ledgers(company["id"])), 2)
         self.assertEqual(routes.connector_master_sync_status(company["id"], user=self.user)["status"], "syncing")
 
@@ -600,17 +602,21 @@ class Parent2FlowTests(unittest.TestCase):
             routes.ConnectorJobResultRequest(
                 agent_id=agent["id"],
                 status="success",
-                result={"stock_items": [{"name": "2.75-18 NGP", "group_name": "Tyres"}]},
+                result={"stock_items": [{"name": "2.75-18 NGP", "group_name": "Tyres", "raw": {"large": "payload"}}]},
             ),
             x_accountpilot_agent_token="agent-secret",
         )
 
         status = routes.connector_master_sync_status(company["id"], user=self.user)
         company = database.get_company(company["id"], user_id=self.user["id"])
+        stored_stock_job = database.get_connector_job(stock_job["id"])
+        self.assertEqual(stored_stock_job["result"], {"summary": {"stock_item_count": 1}})
         self.assertEqual(status["status"], "completed")
         self.assertEqual(company["last_sync_status"], "success")
         self.assertIsNotNone(company["last_sync_at"])
-        self.assertEqual(len(database.list_stock_items(company["id"])), 1)
+        stock_items = database.list_stock_items(company["id"])
+        self.assertEqual(len(stock_items), 1)
+        self.assertNotIn("raw", stock_items[0])
 
     def test_failed_connector_health_job_updates_visible_status(self) -> None:
         company = self.make_company()
@@ -704,7 +710,7 @@ class Parent2FlowTests(unittest.TestCase):
             }
 
         with patch("backend.services.local_agent_service.dispatch_tally_operation", side_effect=fake_dispatch):
-            routes.company_sync(company["id"], user=self.user)
+            sync_from_tally(company=company, agent=agent)
 
         response = routes.company_stock_items(company["id"], user=self.user)
         item = response["items"][0]
@@ -713,7 +719,7 @@ class Parent2FlowTests(unittest.TestCase):
         self.assertEqual(response["groups"], ["Laptops"])
         self.assertEqual(item["base_unit"], "Nos")
         self.assertEqual(item["gst_rate"], 18)
-        self.assertEqual(item["raw"], {"NAME": "Apple MacBook Pro Laptop"})
+        self.assertNotIn("raw", item)
 
     def test_import_rows_persist_and_process_validates_company_masters(self) -> None:
         company = self.make_company()

@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import date
 import logging
 import sqlite3
+import time
 from typing import Any, Optional
 
 from fastapi import APIRouter, BackgroundTasks, Depends, File, Form, Header, HTTPException, Request, Response, UploadFile
@@ -182,6 +183,7 @@ def auth_logout(
 @router.get("/companies")
 def list_companies(user: dict[str, Any] = Depends(auth_service.get_current_user)) -> dict[str, Any]:
     companies = database.list_companies(user["id"])
+    logger.info("company.list.completed user_id=%s count=%s active_company_id=%s", user["id"], len(companies), _active_company_id(companies))
     return {
         "companies": companies,
         "active_company_id": _active_company_id(companies),
@@ -324,6 +326,7 @@ def connector_poll(
 
 @router.post("/connector/setup-session")
 def connector_setup_session(user: dict[str, Any] = Depends(auth_service.get_current_user)) -> dict[str, Any]:
+    logger.info("connector.setup_session.requested user_id=%s", user["id"])
     return create_setup_session(user["id"])
 
 
@@ -367,6 +370,7 @@ def connector_company_validation(job_id: int, user: dict[str, Any] = Depends(aut
 
 @router.post("/connector/register")
 def connector_register(request: ConnectorRegisterRequest) -> dict[str, Any]:
+    logger.info("connector.register.request_received device_name=%s", request.device_name)
     return register_helper(request.setup_token, request.device_name)
 
 
@@ -477,8 +481,17 @@ async def upload_company_excel(
     import_type: str = Form(IMPORT_TYPE_RETAIL),
     user: dict[str, Any] = Depends(auth_service.get_current_user),
 ) -> dict[str, Any]:
+    started = time.perf_counter()
     company = require_company(user["id"], company_id)
     normalized_import_type = _normalize_import_type_or_400(import_type)
+    logger.info(
+        "import.upload.start user_id=%s company_id=%s filename=%s import_type=%s connector_mode=%s",
+        user["id"],
+        company_id,
+        file.filename,
+        normalized_import_type,
+        config.CONNECTOR_MODE,
+    )
     if config.CONNECTOR_MODE == "polling":
         company_has_online_agent(company)
         sync_result = get_master_sync_status(company_id)
@@ -507,13 +520,24 @@ async def upload_company_excel(
             raise _friendly_tally_exception(exc) from exc
         company = database.get_company(company_id, user_id=user["id"])
     rows = await _parse_upload(file, normalized_import_type)
+    logger.info("import.upload.parsed user_id=%s company_id=%s filename=%s rows=%s", user["id"], company_id, file.filename, len(rows))
     import_record = database.create_import(user["id"], company_id, file.filename, rows, import_type=normalized_import_type)
     try:
         processed = _process_import_rows(company, import_record["id"], user)
     except (VoucherBuildError, GstInvoiceError) as exc:
         logger.warning("import.upload.validation_failed user_id=%s company_id=%s import_id=%s error=%r", user["id"], company_id, import_record["id"], exc)
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-    logger.info("import.upload.success user_id=%s company_id=%s import_id=%s rows=%s", user["id"], company_id, import_record["id"], len(rows))
+    duration_ms = int((time.perf_counter() - started) * 1000)
+    logger.info(
+        "import.upload.completed user_id=%s company_id=%s import_id=%s filename=%s import_type=%s rows=%s duration_ms=%s",
+        user["id"],
+        company_id,
+        import_record["id"],
+        file.filename,
+        normalized_import_type,
+        len(rows),
+        duration_ms,
+    )
     return {
         "import": processed["import"],
         "count": len(rows),
@@ -615,12 +639,28 @@ def start_commit_run(
     background_tasks: BackgroundTasks,
     user: dict[str, Any] = Depends(auth_service.get_current_user),
 ) -> dict[str, Any]:
+    logger.info(
+        "commit_run.requested user_id=%s company_id=%s import_id=%s requested_row_ids=%s connector_mode=%s",
+        user["id"],
+        company_id,
+        import_id,
+        len(request.import_row_ids or []),
+        config.CONNECTOR_MODE,
+    )
     require_company(user["id"], company_id)
     import_record = database.get_import(import_id, user["id"], company_id)
     if not import_record:
         raise HTTPException(status_code=404, detail="Import not found")
     active_run = database.get_active_commit_run(user["id"], company_id, import_id)
     if active_run:
+        logger.info(
+            "commit_run.reused_active user_id=%s company_id=%s import_id=%s run_id=%s status=%s",
+            user["id"],
+            company_id,
+            import_id,
+            active_run["id"],
+            active_run["status"],
+        )
         return {"commit_run": _public_commit_run(active_run)}
     total_count = sum(
         1
@@ -630,6 +670,14 @@ def start_commit_run(
         and (not request.import_row_ids or row["id"] in request.import_row_ids)
     )
     run = database.create_commit_run(user["id"], company_id, import_id, total_count=total_count)
+    logger.info(
+        "commit_run.created user_id=%s company_id=%s import_id=%s run_id=%s total_count=%s",
+        user["id"],
+        company_id,
+        import_id,
+        run["id"],
+        total_count,
+    )
     if config.CONNECTOR_MODE == "polling":
         _enqueue_polling_commit_run(run["id"], company_id, import_id, request, user)
         run = database.get_commit_run(run["id"], user["id"], company_id)
@@ -807,11 +855,14 @@ def _row_to_gst(row: dict[str, Any]) -> dict[str, Any]:
 
 
 def _process_import_rows(company: dict[str, Any], import_id: int, user: dict[str, Any]) -> dict[str, Any]:
+    started = time.perf_counter()
     import_record = database.get_import(import_id, user["id"], company["id"])
     if not import_record:
         raise HTTPException(status_code=404, detail="Import not found")
     rows = database.list_import_rows(import_id, company["id"])
-    if normalize_import_type(import_record.get("import_type")) == IMPORT_TYPE_GST:
+    import_type = normalize_import_type(import_record.get("import_type"))
+    logger.info("import.process.start user_id=%s company_id=%s import_id=%s import_type=%s rows=%s", user["id"], company["id"], import_id, import_type, len(rows))
+    if import_type == IMPORT_TYPE_GST:
         result = build_gst_invoices([_row_to_gst(row) for row in rows], company=company, user_id=user["id"])
     else:
         result = build_vouchers([_row_to_sale(row) for row in rows], ensure_ledgers=False, company=company, user_id=user["id"])
@@ -825,9 +876,20 @@ def _process_import_rows(company: dict[str, Any], import_id: int, user: dict[str
         voucher = vouchers_by_row.get(row["id"])
         error = errors_by_row.get(row["id"])
         database.update_import_row_validation(row["id"], "valid" if voucher else "invalid", error, voucher)
-        if voucher and normalize_import_type(import_record.get("import_type")) == IMPORT_TYPE_GST:
+        if voucher and import_type == IMPORT_TYPE_GST:
             database.update_import_row_gst_totals(row["id"], voucher)
     database.update_import_counts(import_id)
+    logger.info(
+        "import.process.completed user_id=%s company_id=%s import_id=%s import_type=%s rows=%s valid_rows=%s invalid_rows=%s duration_ms=%s",
+        user["id"],
+        company["id"],
+        import_id,
+        import_type,
+        len(rows),
+        len(vouchers_by_row),
+        len(errors_by_row),
+        int((time.perf_counter() - started) * 1000),
+    )
     return {
         "import": database.get_import(import_id, user["id"], company["id"]),
         "rows": database.list_import_rows(import_id, company["id"]),
@@ -835,30 +897,49 @@ def _process_import_rows(company: dict[str, Any], import_id: int, user: dict[str
 
 
 def _complete_commit_run(run_id: int, company_id: int, import_id: int, request: CommitRequest, user: dict[str, Any]) -> None:
+    started = time.perf_counter()
+    logger.info("commit_run.direct_processing.start run_id=%s user_id=%s company_id=%s import_id=%s", run_id, user["id"], company_id, import_id)
     database.update_commit_run_status(run_id, "processing")
     try:
         summary = commit_import(company_id, import_id, request, user=user)
-        database.complete_commit_run(run_id, summary)
+        run = database.complete_commit_run(run_id, summary)
+        logger.info(
+            "commit_run.direct_processing.completed run_id=%s user_id=%s company_id=%s import_id=%s status=%s success_count=%s failed_count=%s duration_ms=%s",
+            run_id,
+            user["id"],
+            company_id,
+            import_id,
+            run.get("status") if run else None,
+            run.get("success_count") if run else None,
+            run.get("failed_count") if run else None,
+            int((time.perf_counter() - started) * 1000),
+        )
     except HTTPException as exc:
         database.fail_commit_run(run_id, str(exc.detail))
+        logger.warning("commit_run.direct_processing.failed run_id=%s user_id=%s company_id=%s import_id=%s error=%s", run_id, user["id"], company_id, import_id, exc.detail)
     except Exception as exc:
         logger.exception("commit_run.failed run_id=%s company_id=%s import_id=%s", run_id, company_id, import_id)
         database.fail_commit_run(run_id, str(exc))
 
 
 def _enqueue_polling_commit_run(run_id: int, company_id: int, import_id: int, request: CommitRequest, user: dict[str, Any]) -> None:
+    started = time.perf_counter()
+    logger.info("commit_run.polling_enqueue.start run_id=%s user_id=%s company_id=%s import_id=%s", run_id, user["id"], company_id, import_id)
     company = require_company(user["id"], company_id)
     agent_id = company.get("local_agent_id")
     if not agent_id:
         database.fail_commit_run(run_id, "AccountPilot Helper is not connected")
+        logger.warning("commit_run.polling_enqueue.failed run_id=%s user_id=%s company_id=%s reason=missing_agent", run_id, user["id"], company_id)
         return
     agent = database.get_local_agent(int(agent_id), user_id=user["id"])
     if not agent or agent.get("pairing_status") != "paired":
         database.fail_commit_run(run_id, "AccountPilot Helper is not connected")
+        logger.warning("commit_run.polling_enqueue.failed run_id=%s user_id=%s company_id=%s agent_id=%s reason=agent_not_paired", run_id, user["id"], company_id, agent_id)
         return
     import_record = database.get_import(import_id, user["id"], company_id)
     if not import_record:
         database.fail_commit_run(run_id, "Import not found")
+        logger.warning("commit_run.polling_enqueue.failed run_id=%s user_id=%s company_id=%s import_id=%s reason=import_not_found", run_id, user["id"], company_id, import_id)
         return
     rows = [
         row
@@ -883,6 +964,8 @@ def _enqueue_polling_commit_run(run_id: int, company_id: int, import_id: int, re
             required_ledgers=required_ledgers,
             commit_run_id=run_id,
         )
+        voucher_job_count = 0
+        skipped_count = 0
         rows_by_id = {int(row["id"]): row for row in rows}
         for voucher in result.vouchers:
             if not is_gst:
@@ -893,13 +976,21 @@ def _enqueue_polling_commit_run(run_id: int, company_id: int, import_id: int, re
             if fingerprint and database.successful_fingerprint_exists(str(fingerprint), company_id=company_id):
                 if import_row_id:
                     database.update_import_row_commit(int(import_row_id), "success", None, {"status": "already_committed"})
+                skipped_count += 1
+                logger.info(
+                    "commit_run.voucher_skipped_already_committed run_id=%s company_id=%s import_id=%s import_row_id=%s",
+                    run_id,
+                    company_id,
+                    import_id,
+                    import_row_id,
+                )
                 continue
             voucher_required_ledgers = _required_ledgers_for_voucher_row(
                 rows_by_id.get(int(import_row_id)) if import_row_id else None,
                 company,
                 is_gst=is_gst,
             )
-            database.create_connector_job(
+            job = database.create_connector_job(
                 user_id=user["id"],
                 company_id=company_id,
                 agent_id=int(agent["id"]),
@@ -913,10 +1004,37 @@ def _enqueue_polling_commit_run(run_id: int, company_id: int, import_id: int, re
                 commit_run_id=run_id,
                 depends_on_job_ids=_ledger_dependency_ids(voucher_required_ledgers, missing_ledger_job_ids),
             )
+            voucher_job_count += 1
+            logger.info(
+                "commit_run.voucher_job_queued run_id=%s user_id=%s company_id=%s import_id=%s import_row_id=%s job_id=%s depends_on_job_ids=%s",
+                run_id,
+                user["id"],
+                company_id,
+                import_id,
+                import_row_id,
+                job["id"],
+                job.get("depends_on_job_ids"),
+            )
         for error in result.errors:
             row = rows[error["row"]]
             database.update_import_row_commit(row["id"], "failed", error["error"])
-        database.refresh_commit_run_from_rows(run_id)
+            logger.warning("commit_run.row_build_failed run_id=%s company_id=%s import_id=%s row_id=%s error=%s", run_id, company_id, import_id, row["id"], error["error"])
+        run = database.refresh_commit_run_from_rows(run_id)
+        logger.info(
+            "commit_run.polling_enqueue.completed run_id=%s user_id=%s company_id=%s import_id=%s import_type=%s total_rows=%s ledger_jobs=%s voucher_jobs=%s skipped_count=%s build_errors=%s status=%s duration_ms=%s",
+            run_id,
+            user["id"],
+            company_id,
+            import_id,
+            import_record.get("import_type"),
+            len(rows),
+            len(missing_ledger_job_ids),
+            voucher_job_count,
+            skipped_count,
+            len(result.errors),
+            run.get("status") if run else None,
+            int((time.perf_counter() - started) * 1000),
+        )
     except Exception as exc:
         logger.exception("commit_run.enqueue_failed run_id=%s company_id=%s import_id=%s", run_id, company_id, import_id)
         database.fail_commit_run(run_id, str(exc))
