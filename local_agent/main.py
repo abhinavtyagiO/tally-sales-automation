@@ -6,7 +6,7 @@ from fastapi import FastAPI, Header, HTTPException
 from pydantic import BaseModel
 
 from backend import config
-from backend.services.tally_client import TallyClient, TallyError, _extract_collection, _stock_item_details
+from backend.services.tally_client import TallyClient, TallyError, _extract_collection, _ledger_details, _stock_item_details
 
 
 app = FastAPI(title="Tally Sales Automation Local Agent", version="0.1.0")
@@ -37,12 +37,17 @@ def execute(request: ExecuteRequest, x_accountpilot_agent_token: Optional[str] =
             return {"companies": client.get_companies()}
         if request.operation == "export_collection":
             collection_id = request.payload["collection_id"]
-            data = client.export_collection(collection_id, company_name)
             if collection_id.lower() == "ledger":
-                return {"ledgers": client.get_all_ledgers(company_name), "raw": data}
+                data = client.export_collection(collection_id, company_name)
+                ledgers = [_ledger_details(item) for item in _extract_collection(data, "Ledger")]
+                ledgers = [ledger for ledger in ledgers if ledger.get("name")]
+                return {"ledgers": ledgers, "summary": {"ledger_count": len(ledgers)}}
             if collection_id.lower() == "stockitem":
                 data = client.export_stock_items(company_name)
-                return {"stock_items": [_stock_item_details(item) for item in _extract_collection(data, "StockItem")], "raw": data}
+                stock_items = [_stock_item_details(item) for item in _extract_collection(data, "StockItem")]
+                stock_items = [item for item in stock_items if item.get("name")]
+                return {"stock_items": stock_items, "summary": {"stock_item_count": len(stock_items)}}
+            data = client.export_collection(collection_id, company_name)
             return {"raw": data}
         if request.operation == "create_sales_voucher":
             return client.create_sales_voucher(request.payload["voucher"], company_name=company_name)

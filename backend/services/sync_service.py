@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
+import logging
+import time
 from typing import Any
 
 from backend import config
@@ -9,9 +11,21 @@ from backend.services import local_agent_service
 from backend.services.tally_client import TallyClient
 
 
+logger = logging.getLogger(__name__)
+
+
 def sync_from_tally(client: TallyClient | None = None, company: dict[str, Any] | None = None, agent: dict[str, Any] | None = None) -> dict[str, Any]:
+    started = time.perf_counter()
     tally = client or TallyClient()
     if company and agent:
+        logger.info(
+            "tally.sync.start user_id=%s company_id=%s company_name=%s agent_id=%s mode=%s",
+            company.get("user_id"),
+            company.get("id"),
+            company.get("company_name"),
+            agent.get("id"),
+            "direct" if agent.get("direct_tally") else "local_agent",
+        )
         if agent.get("direct_tally"):
             company_tally = TallyClient(company.get("tally_url") or config.TALLY_URL)
             ledgers = company_tally.get_all_ledgers(company["company_name"])
@@ -32,6 +46,7 @@ def sync_from_tally(client: TallyClient | None = None, company: dict[str, Any] |
         company_name = company["company_name"]
         company_id = company["id"]
     else:
+        logger.info("tally.sync.start user_id=None company_id=None company_name=None agent_id=None mode=legacy")
         ledgers = tally.get_all_ledgers()
         stock_items = tally.get_all_stock_items()
         company_name = tally.get_company_name()
@@ -45,6 +60,15 @@ def sync_from_tally(client: TallyClient | None = None, company: dict[str, Any] |
     database.set_metadata("last_sync_status", "success")
     database.set_metadata("last_sync_at", synced_at)
     database.set_company_sync(company_id, "success", synced_at)
+    logger.info(
+        "tally.sync.completed user_id=%s company_id=%s company_name=%s ledgers_count=%s stock_items_count=%s duration_ms=%s",
+        company.get("user_id") if company else None,
+        company_id,
+        company_name,
+        len(ledgers),
+        len(stock_items),
+        int((time.perf_counter() - started) * 1000),
+    )
 
     return {
         "company": company_name,

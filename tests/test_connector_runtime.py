@@ -3,6 +3,7 @@ from __future__ import annotations
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from connector.main import ConnectorSettings, PollingConnector, load_config, register_with_setup_token
 
@@ -119,6 +120,38 @@ class ConnectorRuntimeTests(unittest.TestCase):
         self.assertEqual(len(poll_requests), 4)
         self.assertEqual(len(result_requests), 3)
         self.assertEqual([post["json"]["status"] for post in result_requests], ["success", "success", "success"])
+
+    def test_stock_sync_dispatch_does_not_include_raw_tally_payload(self) -> None:
+        connector = PollingConnector(self.settings(), FakeTransport({"job": None}))
+        tally_response = {
+            "ENVELOPE": {
+                "BODY": {
+                    "DATA": {
+                        "COLLECTION": {
+                            "STOCKITEM": {
+                                "NAME": "2.75-18 NGP",
+                                "PARENT": "Tyres",
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        with patch("connector.main.TallyClient") as client_class:
+            client_class.return_value.export_stock_items.return_value = tally_response
+            result = connector.dispatch(
+                {
+                    "id": 1,
+                    "operation": "sync_stock_items",
+                    "payload": {"company_name": "Bhrama Enterprises", "tally_url": "http://127.0.0.1:9000"},
+                }
+            )
+
+        self.assertNotIn("raw", result)
+        self.assertEqual(result["summary"], {"stock_item_count": 1})
+        self.assertEqual(result["stock_items"][0]["name"], "2.75-18 NGP")
+        self.assertNotIn("raw", result["stock_items"][0])
 
     def test_register_with_setup_token_persists_connector_config(self) -> None:
         transport = FakeRegistrationTransport()

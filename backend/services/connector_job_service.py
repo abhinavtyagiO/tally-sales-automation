@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
+import json
 import logging
 from typing import Any
 
@@ -126,17 +127,33 @@ def poll_connector_job(agent_id: int, token: str | None) -> dict[str, Any]:
 
 def submit_connector_job_result(agent_id: int, token: str | None, job_id: int, status: str, result: dict[str, Any] | None, error_message: str | None) -> dict[str, Any]:
     agent = authenticate_connector(agent_id, token)
+    result = result or {}
     if status == "success":
-        job = database.complete_connector_job(job_id, int(agent["id"]), result or {})
+        job = database.complete_connector_job(job_id, int(agent["id"]), _result_for_persistence(job_id, result))
     elif status == "failed":
-        job = database.fail_connector_job(job_id, int(agent["id"]), error_message or "Connector job failed", result or {})
+        job = database.fail_connector_job(job_id, int(agent["id"]), error_message or "Connector job failed", _failed_result_for_persistence(result))
     else:
         raise HTTPException(status_code=400, detail="Unsupported connector job result status")
     if not job:
         raise HTTPException(status_code=404, detail="Connector job not found")
-    logger.info("connector.job.result agent_id=%s job_id=%s operation=%s status=%s company_id=%s", agent["id"], job["id"], job["operation"], status, job.get("company_id"))
+    import_row_id = _job_import_row_id(job)
+    logger.info(
+        "connector.job.result agent_id=%s user_id=%s job_id=%s operation=%s status=%s company_id=%s commit_run_id=%s import_row_id=%s result_bytes=%s persisted_result_bytes=%s",
+        agent["id"],
+        agent.get("user_id"),
+        job["id"],
+        job["operation"],
+        status,
+        job.get("company_id"),
+        job.get("commit_run_id"),
+        import_row_id,
+        _json_size(result),
+        _json_size(job.get("result") or {}),
+    )
     database.update_local_agent_activity(int(agent["id"]), None if status == "success" else error_message)
-    _apply_job_result(job)
+    job_for_apply = dict(job)
+    job_for_apply["result"] = result
+    _apply_job_result(job_for_apply)
     return {"job": _public_job(job)}
 
 
@@ -268,11 +285,13 @@ def _apply_job_result(job: dict[str, Any]) -> None:
             database.log_voucher(voucher, {"error": job.get("error_message")}, "failed", source=source)
             database.update_import_row_commit(int(import_row_id), "failed", job.get("error_message") or "Connector job failed")
         if job.get("commit_run_id"):
-            database.refresh_commit_run_from_rows(int(job["commit_run_id"]))
+            run = database.refresh_commit_run_from_rows(int(job["commit_run_id"]))
+            _log_commit_run_progress(run, reason="voucher_failed")
         return
     if job["status"] == "failed" and job.get("company_id") and job["operation"] == "create_ledger":
         if job.get("commit_run_id"):
-            database.refresh_commit_run_from_rows(int(job["commit_run_id"]))
+            run = database.refresh_commit_run_from_rows(int(job["commit_run_id"]))
+            _log_commit_run_progress(run, reason="ledger_failed")
         return
     if job["status"] == "failed" and job.get("company_id") and job["operation"] in {SYNC_LEDGERS_OPERATION, SYNC_STOCK_ITEMS_OPERATION}:
         database.set_company_sync(int(job["company_id"]), "failed", None)
@@ -283,9 +302,13 @@ def _apply_job_result(job: dict[str, Any]) -> None:
     result = job.get("result") or {}
     payload = job.get("payload") or {}
     if job["operation"] == SYNC_LEDGERS_OPERATION:
-        database.replace_ledgers(result.get("ledgers") or [], company_id=company_id)
+        ledgers = result.get("ledgers") or []
+        logger.info("connector.master_apply operation=%s company_id=%s count=%s", job["operation"], company_id, len(ledgers))
+        database.replace_ledgers(ledgers, company_id=company_id)
     elif job["operation"] == SYNC_STOCK_ITEMS_OPERATION:
-        database.replace_stock_items(result.get("stock_items") or [], company_id=company_id)
+        stock_items = result.get("stock_items") or []
+        logger.info("connector.master_apply operation=%s company_id=%s count=%s", job["operation"], company_id, len(stock_items))
+        database.replace_stock_items(stock_items, company_id=company_id)
     elif job["operation"] == "create_ledger":
         database.upsert_ledger(str(payload["name"]), str(payload["group_name"]), company_id=company_id)
         return
@@ -299,7 +322,8 @@ def _apply_job_result(job: dict[str, Any]) -> None:
         if import_row_id:
             database.update_import_row_commit(int(import_row_id), "success", None, result)
         if job.get("commit_run_id"):
-            database.refresh_commit_run_from_rows(int(job["commit_run_id"]))
+            run = database.refresh_commit_run_from_rows(int(job["commit_run_id"]))
+            _log_commit_run_progress(run, reason="voucher_completed")
         return
     else:
         return
@@ -329,6 +353,50 @@ def _latest_connected_agent(user_id: int) -> dict[str, Any]:
 
 def _latest_user_job(user_id: int, operation: str) -> dict[str, Any] | None:
     return database.get_latest_connector_job_for_user(user_id, operation)
+
+
+def _job_import_row_id(job: dict[str, Any]) -> Any:
+    source = (((job.get("payload") or {}).get("voucher") or {}).get("Source") or {})
+    return source.get("import_row_id")
+
+
+def _log_commit_run_progress(run: dict[str, Any] | None, reason: str) -> None:
+    if not run:
+        return
+    logger.info(
+        "commit_run.progress reason=%s run_id=%s user_id=%s company_id=%s import_id=%s status=%s total_count=%s success_count=%s failed_count=%s",
+        reason,
+        run.get("id"),
+        run.get("user_id"),
+        run.get("company_id"),
+        run.get("import_id"),
+        run.get("status"),
+        run.get("total_count"),
+        run.get("success_count"),
+        run.get("failed_count"),
+    )
+
+
+def _result_for_persistence(job_id: int, result: dict[str, Any]) -> dict[str, Any]:
+    job = database.get_connector_job(job_id)
+    operation = job.get("operation") if job else None
+    if operation == SYNC_LEDGERS_OPERATION:
+        return {"summary": {"ledger_count": len(result.get("ledgers") or [])}}
+    if operation == SYNC_STOCK_ITEMS_OPERATION:
+        return {"summary": {"stock_item_count": len(result.get("stock_items") or [])}}
+    return result
+
+
+def _failed_result_for_persistence(result: dict[str, Any]) -> dict[str, Any]:
+    detail = result.get("detail")
+    return {"detail": str(detail)[:500]} if detail else {}
+
+
+def _json_size(value: dict[str, Any]) -> int:
+    try:
+        return len(json.dumps(value, separators=(",", ":")))
+    except (TypeError, ValueError):
+        return 0
 
 
 def _public_job(job: dict[str, Any] | None) -> dict[str, Any] | None:

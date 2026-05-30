@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import re
 from typing import Any
 import xml.etree.ElementTree as ET
@@ -9,6 +10,9 @@ from xml.sax.saxutils import escape
 import requests
 
 from backend import config
+
+
+logger = logging.getLogger(__name__)
 
 
 class TallyError(RuntimeError):
@@ -34,6 +38,7 @@ class TallyClient:
             response.raise_for_status()
         except requests.RequestException as exc:
             raise TallyError(f"Tally request failed: {exc}") from exc
+        logger.info("tally.response.received transport=%s bytes=%s", config.TALLY_TRANSPORT, _response_size(response))
         data = _parse_response(response.text)
         self._raise_for_tally_error(data)
         return data
@@ -49,6 +54,7 @@ class TallyClient:
             response.raise_for_status()
         except requests.RequestException as exc:
             raise TallyError(f"Tally request failed: {exc}") from exc
+        logger.info("tally.response.received transport=xml bytes=%s", _response_size(response))
         data = _parse_response(response.text)
         self._raise_for_tally_error(data)
         return data
@@ -133,14 +139,8 @@ class TallyClient:
     def get_all_ledgers(self, company_name: str | None = None) -> list[dict[str, Any]]:
         data = self.export_collection("Ledger", company_name) if company_name else self.export_data("Ledgers")
         ledgers = _extract_collection(data, "Ledger")
-        return [
-            {
-                "name": _text_value(_get_ci(item, "Name") or _find_first(item, "Name")),
-                "group": _text_value(_get_ci(item, "Parent") or _get_ci(item, "Group")),
-            }
-            for item in ledgers
-            if _text_value(_get_ci(item, "Name") or _find_first(item, "Name"))
-        ]
+        results = [_ledger_details(item) for item in ledgers]
+        return [item for item in results if item.get("name")]
 
     def get_all_stock_items(self, company_name: str | None = None) -> list[dict[str, Any]]:
         data = self.export_stock_items(company_name) if company_name else self.export_data("Stock Items")
@@ -291,7 +291,13 @@ def _stock_item_details(item: dict[str, Any]) -> dict[str, Any]:
         ),
         "hsn_description": _text_value(_get_ci(item, "GSTHSNDescription") or _find_first_text(item, "GSTHSNDescription")),
         "taxability": _text_value(_get_ci(item, "GSTOVRDNTaxability") or _get_ci(item, "Taxability") or _find_first(item, "GSTOVRDNTaxability") or _find_first(item, "Taxability")),
-        "raw": item,
+    }
+
+
+def _ledger_details(item: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "name": _text_value(_get_ci(item, "Name") or _find_first(item, "Name")),
+        "group": _text_value(_get_ci(item, "Parent") or _get_ci(item, "Group")),
     }
 
 
@@ -347,6 +353,13 @@ def _parse_response(text: str) -> dict[str, Any]:
     if not isinstance(parsed, dict):
         raise TallyError(f"Tally request failed: {parsed}")
     return parsed
+
+
+def _response_size(response: requests.Response) -> int:
+    content = getattr(response, "content", None)
+    if content is not None:
+        return len(content)
+    return len(getattr(response, "text", "").encode("utf-8"))
 
 
 def _sanitize_xml(text: str) -> str:

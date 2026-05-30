@@ -12,7 +12,7 @@ from typing import Any, Protocol
 import requests
 
 from backend import config
-from backend.services.tally_client import TallyClient, TallyError, _extract_collection, _stock_item_details
+from backend.services.tally_client import TallyClient, TallyError, _extract_collection, _ledger_details, _stock_item_details
 
 
 logger = logging.getLogger("accountpilot.connector")
@@ -62,12 +62,39 @@ class PollingConnector:
         job = self.poll()
         if not job:
             return False
+        started = time.perf_counter()
+        logger.info(
+            "connector.job.start agent_id=%s job_id=%s operation=%s company_id=%s commit_run_id=%s",
+            self.settings.agent_id,
+            job.get("id"),
+            job.get("operation"),
+            job.get("company_id"),
+            job.get("commit_run_id"),
+        )
         try:
             result = self.dispatch(job)
             self.submit_result(job["id"], "success", result)
+            duration_ms = int((time.perf_counter() - started) * 1000)
+            logger.info(
+                "connector.job.completed agent_id=%s job_id=%s operation=%s status=success duration_ms=%s result_summary=%s",
+                self.settings.agent_id,
+                job.get("id"),
+                job.get("operation"),
+                duration_ms,
+                _result_summary(result),
+            )
         except Exception as exc:
+            duration_ms = int((time.perf_counter() - started) * 1000)
             logger.warning("connector.job_failed job_id=%s operation=%s error=%r", job.get("id"), job.get("operation"), exc)
             self.submit_result(job["id"], "failed", {"detail": str(exc)}, str(exc))
+            logger.warning(
+                "connector.job.completed agent_id=%s job_id=%s operation=%s status=failed duration_ms=%s error=%r",
+                self.settings.agent_id,
+                job.get("id"),
+                job.get("operation"),
+                duration_ms,
+                exc,
+            )
         return True
 
     def poll(self) -> dict[str, Any] | None:
@@ -107,13 +134,22 @@ class PollingConnector:
             return {"companies": client.get_companies()}
         if operation == "validate_company":
             data = client.export_collection("Ledger", company_name)
-            return {"ledgers": client.get_all_ledgers(company_name), "raw": data}
+            ledgers = [_ledger_details(item) for item in _extract_collection(data, "Ledger")]
+            ledgers = [ledger for ledger in ledgers if ledger.get("name")]
+            logger.info("connector.master_export operation=%s company_name=%s count=%s", operation, company_name, len(ledgers))
+            return {"ledgers": ledgers, "summary": {"ledger_count": len(ledgers)}}
         if operation == "sync_ledgers":
             data = client.export_collection("Ledger", company_name)
-            return {"ledgers": client.get_all_ledgers(company_name), "raw": data}
+            ledgers = [_ledger_details(item) for item in _extract_collection(data, "Ledger")]
+            ledgers = [ledger for ledger in ledgers if ledger.get("name")]
+            logger.info("connector.master_export operation=%s company_name=%s count=%s", operation, company_name, len(ledgers))
+            return {"ledgers": ledgers, "summary": {"ledger_count": len(ledgers)}}
         if operation == "sync_stock_items":
             data = client.export_stock_items(company_name)
-            return {"stock_items": [_stock_item_details(item) for item in _extract_collection(data, "StockItem")], "raw": data}
+            stock_items = [_stock_item_details(item) for item in _extract_collection(data, "StockItem")]
+            stock_items = [item for item in stock_items if item.get("name")]
+            logger.info("connector.master_export operation=%s company_name=%s count=%s", operation, company_name, len(stock_items))
+            return {"stock_items": stock_items, "summary": {"stock_item_count": len(stock_items)}}
         if operation == "create_sales_voucher":
             return client.create_sales_voucher(payload["voucher"], company_name=company_name)
         if operation == "create_ledger":
@@ -155,6 +191,21 @@ def configure_logging() -> None:
         format="%(asctime)s %(levelname)s %(name)s %(message)s",
         handlers=[logging.FileHandler(log_path, encoding="utf-8"), logging.StreamHandler()],
     )
+
+
+def _result_summary(result: dict[str, Any]) -> dict[str, Any]:
+    summary = result.get("summary")
+    if isinstance(summary, dict):
+        return summary
+    if "companies" in result:
+        return {"company_count": len(result.get("companies") or [])}
+    if "ledgers" in result:
+        return {"ledger_count": len(result.get("ledgers") or [])}
+    if "stock_items" in result:
+        return {"stock_item_count": len(result.get("stock_items") or [])}
+    if "status" in result:
+        return {"status": result.get("status")}
+    return {"keys": sorted(result.keys())}
 
 
 def load_config(path: Path | None = None) -> dict[str, Any]:
