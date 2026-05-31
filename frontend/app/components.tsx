@@ -35,6 +35,7 @@ import {
   tallyIsConnected,
   tallyIsChecking,
 } from "./lib/derivations";
+import { INDIAN_GST_STATES } from "./lib/gst";
 import type { AppView, CommitRun, CommitSummary, Company, HelperStatus, ImportPreview, ImportRecord, ImportRow, ImportType, StockGroup, StockGroupItemsResponse, StockGroupsResponse, StockItem, TallyCompanies, TallyStatus, User } from "./lib/types";
 
 type ImportDetails = Record<number, ImportRow[]>;
@@ -290,7 +291,14 @@ export function SetupView({
             <label className="field-label" htmlFor="supplier-state">
               Company GST state
             </label>
-            <input id="supplier-state" value={supplierState} onChange={(event) => setSupplierState(event.target.value)} placeholder="Karnataka" disabled={busy} required />
+            <select id="supplier-state" value={supplierState} onChange={(event) => setSupplierState(event.target.value)} disabled={busy} required>
+              <option value="">Select GST state</option>
+              {INDIAN_GST_STATES.map((stateName) => (
+                <option key={stateName} value={stateName}>
+                  {stateName}
+                </option>
+              ))}
+            </select>
           </div>
         </div>
         <p className="muted">GST details are required during setup so GST tax invoices can be created without extra configuration later.</p>
@@ -468,7 +476,8 @@ export function InventoryView({
   const [query, setQuery] = useState("");
   const [selectedGroup, setSelectedGroup] = useState<StockGroup | null>(null);
   const [groupItems, setGroupItems] = useState<StockGroupItemsResponse | null>(null);
-  const [loadingGroupId, setLoadingGroupId] = useState<number | null>(null);
+  const [loadingGroupName, setLoadingGroupName] = useState<string | null>(null);
+  const [groupError, setGroupError] = useState("");
   const groups = stockGroups?.groups || [];
   const filteredGroups = useMemo(
     () =>
@@ -481,21 +490,27 @@ export function InventoryView({
 
   async function openGroup(group: StockGroup) {
     setSelectedGroup(group);
-    setLoadingGroupId(group.id);
+    setGroupItems(null);
+    setGroupError("");
+    setLoadingGroupName(group.name);
     try {
-      setGroupItems(await api(`/companies/${activeCompany.id}/stock-groups/${group.id}/stock-items`));
+      const response = await api(`/companies/${activeCompany.id}/stock-group-items?group_name=${encodeURIComponent(group.name)}`);
+      setSelectedGroup(response.group);
+      setGroupItems(response);
+    } catch (groupFetchError) {
+      setGroupError(groupFetchError instanceof Error ? groupFetchError.message : "Could not load stock items for this group");
     } finally {
-      setLoadingGroupId(null);
+      setLoadingGroupName(null);
     }
   }
 
   async function retryGroup(group: StockGroup) {
-    setLoadingGroupId(group.id);
+    setLoadingGroupName(group.name);
     try {
       await api(`/companies/${activeCompany.id}/stock-groups/${group.id}/retry`, { method: "POST", body: JSON.stringify({}) });
       await refreshInventory();
     } finally {
-      setLoadingGroupId(null);
+      setLoadingGroupName(null);
     }
   }
 
@@ -528,7 +543,7 @@ export function InventoryView({
             </button>
           )}
         </div>
-        <StockGroupsTable groups={filteredGroups} loadingGroupId={loadingGroupId} openGroup={openGroup} retryGroup={retryGroup} />
+        <StockGroupsTable groups={filteredGroups} loadingGroupName={loadingGroupName} openGroup={openGroup} retryGroup={retryGroup} />
         <div className="table-footer">
           Showing {formatNumber(filteredGroups.length)} of {formatNumber(groups.length)} groups
           {stockGroups?.last_sync_at && <span>Last synced: {formatDateTime(stockGroups.last_sync_at)}</span>}
@@ -545,7 +560,8 @@ export function InventoryView({
               Close
             </button>
           </div>
-          {loadingGroupId === selectedGroup.id && !groupItems ? <p className="muted">Loading stock items...</p> : <InventoryTable items={groupItems?.items || []} />}
+          {groupError && <p className="alert error-alert">{groupError}</p>}
+          {loadingGroupName === selectedGroup.name && !groupItems ? <p className="muted">Loading stock items...</p> : <InventoryTable items={groupItems?.items || []} />}
           <div className="table-footer">Showing {formatNumber(groupItems?.items.length || 0)} items</div>
         </section>
       )}
@@ -952,12 +968,12 @@ function RecentActivity({ imports, importDetails, setActiveView }: { imports: Im
 
 function StockGroupsTable({
   groups,
-  loadingGroupId,
+  loadingGroupName,
   openGroup,
   retryGroup,
 }: {
   groups: StockGroup[];
-  loadingGroupId: number | null;
+  loadingGroupName: string | null;
   openGroup: (group: StockGroup) => void;
   retryGroup: (group: StockGroup) => void;
 }) {
@@ -987,11 +1003,11 @@ function StockGroupsTable({
                 <td>{group.last_synced_at ? formatDateTime(group.last_synced_at) : "-"}</td>
                 <td>
                   {failed ? (
-                    <button className="ghost-button" onClick={() => retryGroup(group)} disabled={loadingGroupId === group.id}>
+                    <button className="ghost-button" onClick={() => retryGroup(group)} disabled={loadingGroupName === group.name}>
                       <RefreshCw size={16} /> Retry
                     </button>
                   ) : (
-                    <button className="link-button" onClick={() => openGroup(group)} disabled={loadingGroupId === group.id || group.sync_status !== "completed"}>
+                    <button className="link-button" onClick={() => openGroup(group)} disabled={loadingGroupName === group.name || group.sync_status !== "completed"}>
                       View <ChevronRight size={16} />
                     </button>
                   )}
