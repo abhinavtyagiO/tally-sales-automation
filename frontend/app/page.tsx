@@ -187,6 +187,7 @@ export default function Home() {
 
   useEffect(() => {
     if (!shouldShowOnboarding || onboardingState.currentStepId !== "sync" || masterSyncStatus?.status !== "completed") return;
+    markTallyConnectedFromOnboarding();
     setRequestedOnboardingStep("ready");
     void loadCompanies();
     if (activeCompany?.id) void loadStockGroups(activeCompany.id);
@@ -710,9 +711,19 @@ export default function Home() {
   }
 
   function finishOnboarding(destination: AppView) {
+    markTallyConnectedFromOnboarding();
     setOnboardingActive(false);
     setRequestedOnboardingStep("welcome");
     setActiveView(destination);
+  }
+
+  function markTallyConnectedFromOnboarding() {
+    if (!HELPER_SETUP_ENABLED || helperStatus?.status !== "connected") return;
+    setTallyStatus({
+      status: "connected",
+      detail: "onboarding_completed",
+      message: "Connected to Tally",
+    });
   }
 
   if (!user) {

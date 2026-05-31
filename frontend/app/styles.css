@@ -536,7 +536,8 @@ h3 {
   grid-column: 1 / -1;
 }
 
-.onboarding-form-grid input {
+.onboarding-form-grid input,
+.onboarding-form-grid select {
   width: 100%;
   margin-top: 8px;
 }
@@ -816,7 +817,8 @@ h3 {
   gap: 16px;
 }
 
-.setup-gst-grid input {
+.setup-gst-grid input,
+.setup-gst-grid select {
   width: 100%;
 }
 

@@ -5,6 +5,7 @@ import { Building2, Check, CheckCircle2, ClipboardCheck, Copy, Download, FileSpr
 
 import type { OnboardingDerivedState, OnboardingStepId } from "./lib/onboarding";
 import { getUserInitials, tallyIsConnected } from "./lib/derivations";
+import { INDIAN_GST_STATES } from "./lib/gst";
 import type { Company, HelperStatus, MasterSyncStatus, TallyCompanies, TallyStatus, User } from "./lib/types";
 
 export function OnboardingFlow({
@@ -241,7 +242,14 @@ export function OnboardingFlow({
                 </label>
                 <label>
                   <span className="field-label">Company GST state</span>
-                  <input value={supplierState} onChange={(event) => setSupplierState(event.target.value)} placeholder="Karnataka" disabled={busy} />
+                  <select value={supplierState} onChange={(event) => setSupplierState(event.target.value)} disabled={busy}>
+                    <option value="">Select GST state</option>
+                    {INDIAN_GST_STATES.map((stateName) => (
+                      <option key={stateName} value={stateName}>
+                        {stateName}
+                      </option>
+                    ))}
+                  </select>
                 </label>
               </div>
               {!tallyCompanies.available && tallyCompanies.message && <p className="muted">{tallyCompanies.message}</p>}

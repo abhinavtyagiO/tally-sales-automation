@@ -7,7 +7,7 @@ import sqlite3
 import time
 from typing import Any, Optional
 
-from fastapi import APIRouter, BackgroundTasks, Depends, File, Form, Header, HTTPException, Request, Response, UploadFile
+from fastapi import APIRouter, BackgroundTasks, Depends, File, Form, Header, HTTPException, Query, Request, Response, UploadFile
 from pydantic import BaseModel, Field
 
 from backend import config
@@ -543,6 +543,24 @@ def company_stock_group_items(company_id: int, stock_group_id: int, user: dict[s
     if not group:
         raise HTTPException(status_code=404, detail="Stock group not found")
     items = database.list_stock_items_for_group(company_id, stock_group_id)
+    low_stock_count = sum(1 for item in items if _stock_quantity(item.get("closing_balance")) is not None and _stock_quantity(item.get("closing_balance")) <= 5)
+    return {
+        "company_id": company_id,
+        "company": company["company_name"],
+        "group": group,
+        "count": len(items),
+        "low_stock_count": low_stock_count,
+        "items": items,
+    }
+
+
+@router.get("/companies/{company_id}/stock-group-items")
+def company_stock_group_items_by_name(company_id: int, group_name: str = Query(..., min_length=1), user: dict[str, Any] = Depends(auth_service.get_current_user)) -> dict[str, Any]:
+    company = require_company(user["id"], company_id)
+    group = database.get_stock_group_by_name(group_name, company_id)
+    if not group:
+        raise HTTPException(status_code=404, detail="Stock group not found")
+    items = database.list_stock_items_for_group(company_id, int(group["id"]))
     low_stock_count = sum(1 for item in items if _stock_quantity(item.get("closing_balance")) is not None and _stock_quantity(item.get("closing_balance")) <= 5)
     return {
         "company_id": company_id,
