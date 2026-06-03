@@ -31,7 +31,7 @@ class FakeTally:
         ]
 
     def get_all_stock_items(self):
-        return ["2.75-18 NGP"]
+        return [{"name": "2.75-18 NGP", "gst_rate": 18, "base_unit": "nos", "taxability": "Taxable"}]
 
     def get_company_name(self):
         return "Test Company"
@@ -56,11 +56,13 @@ class MvpFlowTests(unittest.TestCase):
         ledgers = [
             {"name": "Cash", "group": "Cash-in-Hand"},
             {"name": "Sales", "group": "Sales Accounts"},
+            {"name": "CGST", "group": "Duties & Taxes"},
+            {"name": "SGST", "group": "Duties & Taxes"},
         ]
         if include_upi:
             ledgers.append({"name": "UPI", "group": "Bank Accounts"})
         database.replace_ledgers(ledgers)
-        database.replace_stock_items(["2.75-18 NGP"])
+        database.replace_stock_items([{"name": "2.75-18 NGP", "gst_rate": 18, "base_unit": "nos", "taxability": "Taxable"}])
         database.set_metadata("last_sync_at", datetime.now(timezone.utc).isoformat())
         database.set_metadata("last_sync_status", "success")
 
@@ -128,6 +130,11 @@ class MvpFlowTests(unittest.TestCase):
         voucher = result["vouchers"][0]
         self.assertEqual(voucher["Date"], "2026-05-04")
         self.assertEqual(voucher["LedgerEntries"][0]["LedgerName"], "Sales")
+        self.assertEqual(voucher["TaxSplit"]["taxable_amount"], 1355.93)
+        self.assertEqual(voucher["TaxSplit"]["cgst_amount"], 122.03)
+        self.assertEqual(voucher["TaxSplit"]["sgst_amount"], 122.04)
+        self.assertEqual(voucher["InvoiceTotal"], 1600)
+        self.assertEqual(voucher["LedgerEntries"][-1], {"LedgerName": "Cash", "Amount": -1600})
         self.assertEqual(result["ready_count"], 1)
 
     def test_process_reports_row_level_validation_errors(self) -> None:
@@ -261,9 +268,11 @@ class MvpFlowTests(unittest.TestCase):
                     "Date": "2026-05-04",
                     "PartyLedgerName": "Cash",
                     "Source": {"source_fingerprint": "abc"},
-                    "InventoryEntries": [{"StockItemName": "2.75-18 NGP", "Rate": 1600, "Amount": 1600, "Quantity": 1}],
+                    "InventoryEntries": [{"StockItemName": "2.75-18 NGP", "Rate": 1355.93, "Amount": 1355.93, "Quantity": 1, "GSTRate": 18}],
                     "LedgerEntries": [
-                        {"LedgerName": "Sales", "Amount": 1600},
+                        {"LedgerName": "Sales", "Amount": 1355.93},
+                        {"LedgerName": "CGST", "Amount": 122.03},
+                        {"LedgerName": "SGST", "Amount": 122.04},
                         {"LedgerName": "Cash", "Amount": -1600},
                     ],
                 }
@@ -276,7 +285,9 @@ class MvpFlowTests(unittest.TestCase):
         self.assertIn("<ALLINVENTORYENTRIES.LIST>", sent["data"])
         self.assertIn("<STOCKITEMNAME>2.75-18 NGP</STOCKITEMNAME>", sent["data"])
         self.assertIn("<SVVCHIMPORTFORMAT>XML</SVVCHIMPORTFORMAT>", sent["data"])
-        self.assertIn("<RATE>1600.00/nos</RATE>", sent["data"])
+        self.assertIn("<RATE>1355.93/nos</RATE>", sent["data"])
+        self.assertIn("<LEDGERNAME>CGST</LEDGERNAME>", sent["data"])
+        self.assertIn("<LEDGERNAME>SGST</LEDGERNAME>", sent["data"])
         self.assertIn("<BILLEDQTY>1 nos</BILLEDQTY>", sent["data"])
         self.assertIn("<BATCHALLOCATIONS.LIST>", sent["data"])
         self.assertIn("<ACCOUNTINGALLOCATIONS.LIST>", sent["data"])

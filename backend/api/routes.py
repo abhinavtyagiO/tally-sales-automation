@@ -989,7 +989,7 @@ def _process_import_rows(company: dict[str, Any], import_id: int, user: dict[str
         voucher = vouchers_by_row.get(row["id"])
         error = errors_by_row.get(row["id"])
         database.update_import_row_validation(row["id"], "valid" if voucher else "invalid", error, voucher)
-        if voucher and import_type == IMPORT_TYPE_GST:
+        if voucher:
             database.update_import_row_gst_totals(row["id"], voucher)
     database.update_import_counts(import_id)
     logger.info(

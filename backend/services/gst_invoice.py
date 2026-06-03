@@ -44,7 +44,7 @@ def normalize_import_type(value: str | None) -> str:
 
 
 def import_type_label(import_type: str | None) -> str:
-    return "GST Tax Invoices" if normalize_import_type(import_type) == IMPORT_TYPE_GST else "Retail Sales"
+    return "Invoice for GST Firms" if normalize_import_type(import_type) == IMPORT_TYPE_GST else "Invoice for Individual Customers"
 
 
 def validate_gstin(value: str) -> bool:

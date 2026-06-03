@@ -442,9 +442,14 @@ def _sales_voucher_xml(voucher: dict[str, Any], company_name: str | None = None)
     if company_name:
         company_xml = f"<SVCURRENTCOMPANY>{_xml_text(company_name)}</SVCURRENTCOMPANY>"
 
-    party_entry = _ledger_entry_xml(voucher["PartyLedgerName"], voucher["LedgerEntries"][1]["Amount"], is_party=True)
-    sales_ledger_name = voucher["LedgerEntries"][0]["LedgerName"]
-    inventory_entries = "\n".join(_inventory_entry_xml(item, sales_ledger_name) for item in voucher.get("InventoryEntries", []))
+    ledger_entries = voucher.get("LedgerEntries") or []
+    sales_entry = ledger_entries[0]
+    party_entry_data = next((entry for entry in ledger_entries if entry.get("LedgerName") == voucher["PartyLedgerName"]), ledger_entries[-1])
+    tax_entries = [entry for entry in ledger_entries[1:] if entry is not party_entry_data]
+    party_entry = _ledger_entry_xml(voucher["PartyLedgerName"], party_entry_data["Amount"], is_party=True)
+    sales_ledger_name = sales_entry["LedgerName"]
+    inventory_entries = "\n".join(_sales_inventory_entry_xml(item, sales_ledger_name) for item in voucher.get("InventoryEntries", []))
+    tax_ledger_entries = "\n".join(_ledger_entry_xml(entry["LedgerName"], entry["Amount"]) for entry in tax_entries if float(entry.get("Amount") or 0) > 0)
 
     return f"""<ENVELOPE>
   <HEADER>
@@ -473,12 +478,21 @@ def _sales_voucher_xml(voucher: dict[str, Any], company_name: str | None = None)
             <PERSISTEDVIEW>Invoice Voucher View</PERSISTEDVIEW>
             <ISINVOICE>Yes</ISINVOICE>
             {inventory_entries}
+            {tax_ledger_entries}
             {party_entry}
           </VOUCHER>
         </TALLYMESSAGE>
     </DATA>
   </BODY>
 </ENVELOPE>"""
+
+
+def _sales_inventory_entry_xml(item: dict[str, Any], sales_ledger_name: str) -> str:
+    if item.get("GSTRate") is not None:
+        item_with_ledger = dict(item)
+        item_with_ledger.setdefault("SalesLedgerName", sales_ledger_name)
+        return _gst_inventory_entry_xml(item_with_ledger)
+    return _inventory_entry_xml(item, sales_ledger_name)
 
 
 def _stock_groups_collection_xml(company_name: str | None = None) -> str:

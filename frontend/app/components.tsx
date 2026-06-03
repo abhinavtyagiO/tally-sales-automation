@@ -602,8 +602,9 @@ export function UploadView({
       ]
     : [
         "Use columns `product_name`, `price`, `payment_mode`, and `voucher_date`.",
-        "Product names must exactly match stock items in Tally.",
-        "Each valid row becomes one sales voucher.",
+        "Product names must exactly match stock items in Tally with GST rate configured.",
+        "Price is GST-inclusive; CGST and SGST are calculated automatically.",
+        "Each valid row becomes one sales invoice for an individual customer.",
         "Voucher dates must be valid.",
       ];
   return (
@@ -616,12 +617,12 @@ export function UploadView({
         <div className="upload-type-grid">
           <button className={importType === "retail_sales" ? "upload-type-card active" : "upload-type-card"} onClick={() => setImportType("retail_sales")} disabled={busy}>
             <FileSpreadsheet size={22} />
-            <strong>Retail Sales</strong>
-            <span>Standard sales voucher rows</span>
+            <strong>Invoice for Individual Customers</strong>
+            <span>GST-inclusive invoice rows</span>
           </button>
           <button className={isGst ? "upload-type-card active" : "upload-type-card"} onClick={() => setImportType("gst_tax_invoice")} disabled={busy}>
             <FileSpreadsheet size={22} />
-            <strong>GST Tax Invoices</strong>
+            <strong>Invoice for GST Firms</strong>
             <span>Buyer GSTIN, state, tax and invoice rows</span>
           </button>
         </div>
@@ -992,6 +993,7 @@ function StockGroupsTable({
         <tbody>
           {groups.map((group) => {
             const failed = group.sync_status === "failed";
+            const empty = group.sync_status === "completed" && !group.item_count;
             return (
               <tr key={group.id} className={failed ? "warning-row" : ""}>
                 <td>
@@ -1006,6 +1008,8 @@ function StockGroupsTable({
                     <button className="ghost-button" onClick={() => retryGroup(group)} disabled={loadingGroupName === group.name}>
                       <RefreshCw size={16} /> Retry
                     </button>
+                  ) : empty ? (
+                    <span className="muted">No items</span>
                   ) : (
                     <button className="link-button" onClick={() => openGroup(group)} disabled={loadingGroupName === group.name || group.sync_status !== "completed"}>
                       View <ChevronRight size={16} />
@@ -1044,6 +1048,11 @@ function InventoryTable({ items }: { items: StockItem[] }) {
           </tr>
         </thead>
         <tbody>
+          {!items.length && (
+            <tr>
+              <td colSpan={8}>No stock items found in this group.</td>
+            </tr>
+          )}
           {items.map((item) => {
             const closingQuantity = parseStockNumber(item.closing_balance);
             return (
@@ -1184,7 +1193,7 @@ function downloadTemplate(importType: ImportType) {
   const blob = new Blob([workbook], { type: "application/vnd.ms-excel" });
   const link = document.createElement("a");
   link.href = URL.createObjectURL(blob);
-  link.download = importType === "gst_tax_invoice" ? "gst-tax-invoice-template.xls" : "retail-sales-template.xls";
+  link.download = importType === "gst_tax_invoice" ? "invoice-for-gst-firms-template.xls" : "invoice-for-individual-customers-template.xls";
   link.click();
   URL.revokeObjectURL(link.href);
 }

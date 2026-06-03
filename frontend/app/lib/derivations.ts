@@ -68,7 +68,7 @@ export function formatCurrency(value: number) {
 }
 
 export function importTypeLabel(importType?: ImportType | string | null) {
-  return importType === "gst_tax_invoice" ? "GST Tax Invoice" : "Retail Sales";
+  return importType === "gst_tax_invoice" ? "Invoice for GST Firms" : "Invoice for Individual Customers";
 }
 
 export function formatNumber(value: number) {
