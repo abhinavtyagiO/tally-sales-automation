@@ -67,7 +67,7 @@ class Parent2FlowTests(unittest.TestCase):
         if operation == "export_collection" and payload["collection_id"] == "Ledger":
             return {"ledgers": [{"name": "Sales", "group": "Sales Accounts"}, {"name": "Cash", "group": "Cash-in-Hand"}]}
         if operation == "export_collection" and payload["collection_id"] == "StockItem":
-            return {"stock_items": ["2.75-18 NGP"]}
+            return {"stock_items": [{"name": "2.75-18 NGP", "gst_rate": 18, "base_unit": "nos", "taxability": "Taxable"}]}
         if operation == "create_sales_voucher":
             return {"STATUS": "1"}
         return {}
@@ -76,11 +76,13 @@ class Parent2FlowTests(unittest.TestCase):
         ledgers = [
             {"name": "Cash", "group": "Cash-in-Hand"},
             {"name": "Sales", "group": "Sales Accounts"},
+            {"name": config.CGST_LEDGER_NAME, "group": "Duties & Taxes"},
+            {"name": config.SGST_LEDGER_NAME, "group": "Duties & Taxes"},
         ]
         if include_upi:
             ledgers.append({"name": "UPI", "group": "Bank Accounts"})
         database.replace_ledgers(ledgers, company_id=company["id"])
-        database.replace_stock_items(["2.75-18 NGP"], company_id=company["id"])
+        database.replace_stock_items([{"name": "2.75-18 NGP", "gst_rate": 18, "base_unit": "nos", "taxability": "Taxable"}], company_id=company["id"])
         database.set_company_sync(company["id"], "success", database.utc_now())
 
     def upload_rows(self, company: dict) -> dict:
@@ -1002,7 +1004,7 @@ class Parent2FlowTests(unittest.TestCase):
             },
         )
         company = database.get_company(company["id"], user_id=self.user["id"])
-        database.replace_stock_items(["2.75-18 NGP"], company_id=company["id"])
+        database.replace_stock_items([{"name": "2.75-18 NGP", "gst_rate": 18, "base_unit": "nos", "taxability": "Taxable"}], company_id=company["id"])
         database.replace_ledgers([{"name": "Existing Ledger", "group": "Current Assets"}], company_id=company["id"])
         database.set_company_sync(company["id"], "success", database.utc_now())
         rows = [
@@ -1034,9 +1036,19 @@ class Parent2FlowTests(unittest.TestCase):
 
         self.assertEqual(processed["import"]["valid_count"], 1)
         self.assertEqual(committed["success_count"], 1)
-        self.assertEqual(created_ledgers, [("Retail Sales", "Sales Accounts"), ("Card Collections", "Bank Accounts")])
+        self.assertEqual(
+            created_ledgers,
+            [
+                ("Retail Sales", "Sales Accounts"),
+                ("Card Collections", "Bank Accounts"),
+                ("CGST", "Duties & Taxes"),
+                ("SGST", "Duties & Taxes"),
+            ],
+        )
         self.assertIsNotNone(database.get_ledger_by_name("Retail Sales", company_id=company["id"]))
         self.assertIsNotNone(database.get_ledger_by_name("Card Collections", company_id=company["id"]))
+        self.assertIsNotNone(database.get_ledger_by_name("CGST", company_id=company["id"]))
+        self.assertIsNotNone(database.get_ledger_by_name("SGST", company_id=company["id"]))
 
     def test_commit_import_rows_through_local_agent_and_blocks_duplicates(self) -> None:
         company = self.make_company()

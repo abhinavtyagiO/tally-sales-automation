@@ -9,6 +9,7 @@ import {
   formatRowError,
   getUserInitials,
   getVoucherIdentifier,
+  importTypeLabel,
   summarizePreview,
 } from "./derivations.ts";
 import { deriveOnboardingState, isCompanySetupComplete } from "./onboarding.ts";
@@ -85,6 +86,11 @@ test("deriveImportStatus handles partial and validation states", () => {
   assert.deepEqual(deriveImportStatus(baseImport, rows), { label: "Partial", tone: "warning" });
   assert.deepEqual(deriveImportStatus({ ...baseImport, valid_count: 0, error_count: 3 }, []), { label: "Invalid", tone: "error" });
   assert.deepEqual(deriveImportStatus({ ...baseImport, valid_count: 3, error_count: 0 }, []), { label: "Ready", tone: "success" });
+});
+
+test("importTypeLabel uses product-facing invoice names", () => {
+  assert.equal(importTypeLabel("retail_sales"), "Invoice for Individual Customers");
+  assert.equal(importTypeLabel("gst_tax_invoice"), "Invoice for GST Firms");
 });
 
 test("voucher identifiers and user initials degrade gracefully", () => {

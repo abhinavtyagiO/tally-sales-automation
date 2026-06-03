@@ -58,18 +58,21 @@ def build_vouchers(
             )
             continue
 
+        stock = dict(stock_item)
         try:
             voucher_date = _parse_voucher_date(row.get("voucher_date"))
             party_ledger = _resolve_party_ledger(str(row.get("payment_mode", "")).lower(), ensure_ledgers, company=company)
             source = _build_source(row, index, voucher_date, company_id=company_id, user_id=user_id)
             voucher = _build_sales_voucher(
-                stock_item_name=stock_item["name"],
+                stock_item_name=stock["name"],
                 price=float(row["price"]),
                 payment_mode=str(row["payment_mode"]).lower(),
                 voucher_date=voucher_date.isoformat(),
                 party_ledger=party_ledger,
                 sales_ledger=sales_ledger,
                 source=source,
+                stock_item=stock,
+                company=company,
             )
             _validate_voucher(voucher)
             vouchers.append(voucher)
@@ -132,6 +135,12 @@ def required_ledgers_for_rows(rows: list[dict[str, Any]], company: dict[str, Any
     ]
     for row in rows:
         required.append(resolve_payment_ledger(str(row.get("payment_mode", "")), company))
+    required.extend(
+        [
+            {"ledger_name": _company_value(company, "cgst_ledger_name", config.CGST_LEDGER_NAME), "group_name": "Duties & Taxes"},
+            {"ledger_name": _company_value(company, "sgst_ledger_name", config.SGST_LEDGER_NAME), "group_name": "Duties & Taxes"},
+        ]
+    )
 
     deduped: dict[str, dict[str, str]] = {}
     for ledger in required:
@@ -204,33 +213,98 @@ def _build_sales_voucher(
     party_ledger: str,
     sales_ledger: str,
     source: dict[str, Any],
+    stock_item: dict[str, Any],
+    company: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    amount = round(price, 2)
+    tax = _calculate_inclusive_cgst_sgst(price, stock_item)
+    sales_amount = tax["taxable_amount"]
+    invoice_total = tax["invoice_total"]
+    cgst_ledger = _company_value(company, "cgst_ledger_name", config.CGST_LEDGER_NAME)
+    sgst_ledger = _company_value(company, "sgst_ledger_name", config.SGST_LEDGER_NAME)
     return {
+        "VoucherKind": "individual_customer_invoice",
         "VoucherTypeName": "Sales",
         "Date": voucher_date,
         "PartyLedgerName": party_ledger,
         "PaymentMode": payment_mode,
+        "CGSTLedgerName": cgst_ledger,
+        "SGSTLedgerName": sgst_ledger,
+        "TaxableAmount": sales_amount,
+        "GSTAmount": tax["gst_amount"],
+        "InvoiceTotal": invoice_total,
+        "TaxSplit": tax,
         "Source": source,
         "InventoryEntries": [
             {
                 "StockItemName": stock_item_name,
-                "Rate": amount,
-                "Amount": amount,
+                "Rate": sales_amount,
+                "Amount": sales_amount,
                 "Quantity": 1,
+                "Unit": stock_item.get("base_unit") or "nos",
+                "HSNCode": stock_item.get("hsn_code") or "",
+                "GSTType": stock_item.get("gst_type") or "Goods",
+                "Taxability": stock_item.get("taxability") or "Taxable",
+                "GSTRate": tax["gst_rate"],
+                "SalesLedgerName": sales_ledger,
             }
         ],
         "LedgerEntries": [
             {
                 "LedgerName": sales_ledger,
-                "Amount": amount,
+                "Amount": sales_amount,
+            },
+            {
+                "LedgerName": cgst_ledger,
+                "Amount": tax["cgst_amount"],
+            },
+            {
+                "LedgerName": sgst_ledger,
+                "Amount": tax["sgst_amount"],
             },
             {
                 "LedgerName": party_ledger,
-                "Amount": -amount,
+                "Amount": -invoice_total,
             },
         ],
     }
+
+
+def _calculate_inclusive_cgst_sgst(price: float, stock_item: dict[str, Any]) -> dict[str, float | bool]:
+    invoice_total = round(float(price), 2)
+    if invoice_total <= 0:
+        raise VoucherBuildError("price must be a positive number")
+    gst_rate = _positive_or_zero(stock_item.get("gst_rate"), "GST rate")
+    if gst_rate <= 0:
+        raise VoucherBuildError("GST rate is missing for this stock item")
+    taxable_amount = round(invoice_total * 100 / (100 + gst_rate), 2)
+    gst_amount = round(invoice_total - taxable_amount, 2)
+    cgst_amount = round(gst_amount / 2, 2)
+    sgst_amount = round(gst_amount - cgst_amount, 2)
+    return {
+        "taxable_amount": taxable_amount,
+        "gst_rate": gst_rate,
+        "same_state": True,
+        "cgst_rate": gst_rate / 2,
+        "sgst_rate": gst_rate / 2,
+        "igst_rate": 0.0,
+        "cgst_amount": cgst_amount,
+        "sgst_amount": sgst_amount,
+        "igst_amount": 0.0,
+        "gst_amount": round(cgst_amount + sgst_amount, 2),
+        "invoice_total": invoice_total,
+    }
+
+
+def _positive_or_zero(value: Any, label: str) -> float:
+    if value in {None, ""}:
+        return 0.0
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError) as exc:
+        raise VoucherBuildError(f"{label} must be a number") from exc
+    if parsed < 0:
+        raise VoucherBuildError(f"{label} must be zero or greater")
+    return parsed
 
 
 def _validate_voucher(voucher: dict[str, Any]) -> None:
