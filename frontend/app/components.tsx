@@ -39,6 +39,7 @@ import { INDIAN_GST_STATES } from "./lib/gst";
 import type { AppView, CommitRun, CommitSummary, Company, HelperStatus, ImportPreview, ImportRecord, ImportRow, ImportType, StockGroup, StockGroupItemsResponse, StockGroupsResponse, StockItem, TallyCompanies, TallyStatus, User } from "./lib/types";
 
 type ImportDetails = Record<number, ImportRow[]>;
+const INVENTORY_PAGE_SIZE = 15;
 
 export function LoginPanel({
   googleButtonRef,
@@ -478,6 +479,7 @@ export function InventoryView({
   const [groupItems, setGroupItems] = useState<StockGroupItemsResponse | null>(null);
   const [loadingGroupName, setLoadingGroupName] = useState<string | null>(null);
   const [groupError, setGroupError] = useState("");
+  const [groupPage, setGroupPage] = useState(1);
   const groups = stockGroups?.groups || [];
   const filteredGroups = useMemo(
     () =>
@@ -492,6 +494,7 @@ export function InventoryView({
     setSelectedGroup(group);
     setGroupItems(null);
     setGroupError("");
+    setGroupPage(1);
     setLoadingGroupName(group.name);
     try {
       const response = await api(`/companies/${activeCompany.id}/stock-group-items?group_name=${encodeURIComponent(group.name)}`);
@@ -512,6 +515,61 @@ export function InventoryView({
     } finally {
       setLoadingGroupName(null);
     }
+  }
+
+  function closeGroup() {
+    setSelectedGroup(null);
+    setGroupItems(null);
+    setGroupError("");
+    setGroupPage(1);
+  }
+
+  const groupItemRows = groupItems?.items || [];
+  const groupTotalPages = Math.max(1, Math.ceil(groupItemRows.length / INVENTORY_PAGE_SIZE));
+  const safeGroupPage = Math.min(groupPage, groupTotalPages);
+  const groupStartIndex = (safeGroupPage - 1) * INVENTORY_PAGE_SIZE;
+  const paginatedGroupItems = groupItemRows.slice(groupStartIndex, groupStartIndex + INVENTORY_PAGE_SIZE);
+  const groupRangeStart = groupItemRows.length ? groupStartIndex + 1 : 0;
+  const groupRangeEnd = Math.min(groupStartIndex + INVENTORY_PAGE_SIZE, groupItemRows.length);
+
+  if (selectedGroup) {
+    return (
+      <div className="stack">
+        <div className="page-intro with-actions">
+          <div>
+            <button className="ghost-button back-button" onClick={closeGroup}>
+              <ArrowLeft size={18} /> Back to stock groups
+            </button>
+            <p className="eyebrow">Stock Group</p>
+            <h1>{selectedGroup.name}</h1>
+            <p>Review stock items synced under this Tally stock group.</p>
+          </div>
+          <button className="primary-button" onClick={() => openGroup(selectedGroup)} disabled={loadingGroupName === selectedGroup.name}>
+            <RefreshCw size={18} /> {loadingGroupName === selectedGroup.name ? "Refreshing..." : "Refresh Group"}
+          </button>
+        </div>
+        {groupError && <p className="alert error-alert">{groupError}</p>}
+        <section className="card inventory-card">
+          {loadingGroupName === selectedGroup.name && !groupItems ? <p className="muted inventory-loading">Loading stock items...</p> : <InventoryTable items={paginatedGroupItems} />}
+          <div className="table-footer inventory-detail-footer">
+            <span>
+              Showing {formatNumber(groupRangeStart)}-{formatNumber(groupRangeEnd)} of {formatNumber(groupItemRows.length)} items
+            </span>
+            <div className="pagination-controls">
+              <button className="ghost-button" onClick={() => setGroupPage((page) => Math.max(1, page - 1))} disabled={safeGroupPage <= 1}>
+                Previous
+              </button>
+              <span>
+                Page {formatNumber(safeGroupPage)} of {formatNumber(groupTotalPages)}
+              </span>
+              <button className="ghost-button" onClick={() => setGroupPage((page) => Math.min(groupTotalPages, page + 1))} disabled={safeGroupPage >= groupTotalPages}>
+                Next
+              </button>
+            </div>
+          </div>
+        </section>
+      </div>
+    );
   }
 
   return (
@@ -549,22 +607,6 @@ export function InventoryView({
           {stockGroups?.last_sync_at && <span>Last synced: {formatDateTime(stockGroups.last_sync_at)}</span>}
         </div>
       </section>
-      {selectedGroup && (
-        <section className="card inventory-card">
-          <div className="page-intro with-actions compact-intro">
-            <div>
-              <p className="eyebrow">Stock Group</p>
-              <h3>{selectedGroup.name}</h3>
-            </div>
-            <button className="ghost-button" onClick={() => { setSelectedGroup(null); setGroupItems(null); }}>
-              Close
-            </button>
-          </div>
-          {groupError && <p className="alert error-alert">{groupError}</p>}
-          {loadingGroupName === selectedGroup.name && !groupItems ? <p className="muted">Loading stock items...</p> : <InventoryTable items={groupItems?.items || []} />}
-          <div className="table-footer">Showing {formatNumber(groupItems?.items.length || 0)} items</div>
-        </section>
-      )}
     </div>
   );
 }
