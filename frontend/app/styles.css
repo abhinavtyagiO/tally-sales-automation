@@ -1191,10 +1191,30 @@ h3 {
 .table-footer {
   display: flex;
   justify-content: space-between;
+  align-items: center;
   gap: 16px;
   padding: 18px 20px;
   background: var(--surface-muted);
   color: var(--muted);
+}
+
+.inventory-detail-footer {
+  flex-wrap: wrap;
+}
+
+.pagination-controls {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.pagination-controls span {
+  color: var(--muted);
+  font-size: 14px;
+}
+
+.inventory-loading {
+  padding: 24px;
 }
 
 .side-stack {
