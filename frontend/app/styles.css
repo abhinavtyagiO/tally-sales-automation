@@ -172,6 +172,11 @@ h3 {
   color: var(--muted);
 }
 
+.block-text {
+  display: block;
+  margin-top: 2px;
+}
+
 .login-form {
   display: grid;
   gap: 12px;

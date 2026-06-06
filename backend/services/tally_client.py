@@ -270,8 +270,11 @@ def _text_value(value: Any) -> str | None:
 
 
 def _stock_item_details(item: dict[str, Any]) -> dict[str, Any]:
+    part_number = _stock_item_part_number(item)
     return {
         "name": _stock_item_name(item),
+        "display_name": _stock_item_display_name(item, part_number),
+        "part_number": part_number,
         "group_name": _text_value(_get_ci(item, "Parent") or _get_ci(item, "Group")),
         "category": _text_value(_get_ci(item, "Category") or _get_ci(item, "StockCategory")),
         "base_unit": _text_value(_get_ci(item, "BaseUnits") or _get_ci(item, "BaseUnit")),
@@ -295,6 +298,35 @@ def _stock_item_details(item: dict[str, Any]) -> dict[str, Any]:
         "hsn_description": _text_value(_get_ci(item, "GSTHSNDescription") or _find_first_text(item, "GSTHSNDescription")),
         "taxability": _text_value(_get_ci(item, "GSTOVRDNTaxability") or _get_ci(item, "Taxability") or _find_first(item, "GSTOVRDNTaxability") or _find_first(item, "Taxability")),
     }
+
+
+def _stock_item_display_name(item: dict[str, Any], part_number: str | None) -> str | None:
+    return (
+        _stock_item_mailing_name(item)
+        or _text_value(_get_ci(item, "DisplayName") or _get_ci(item, "DISPLAYNAME"))
+        or part_number
+        or _text_value(_get_ci(item, "Alias") or _get_ci(item, "OnlyAlias") or _get_ci(item, "APOnlyAlias"))
+    )
+
+
+def _stock_item_part_number(item: dict[str, Any]) -> str | None:
+    return _text_value(_get_ci(item, "PartNo") or _get_ci(item, "APPartNo"))
+
+
+def _stock_item_mailing_name(item: dict[str, Any]) -> str | None:
+    mailing_names = _get_ci(item, "MAILINGNAME.LIST")
+    if not mailing_names:
+        return None
+    if not isinstance(mailing_names, list):
+        mailing_names = [mailing_names]
+    for mailing_name in mailing_names:
+        if isinstance(mailing_name, dict):
+            name = _text_value(_get_ci(mailing_name, "MAILINGNAME"))
+        else:
+            name = _text_value(mailing_name)
+        if name:
+            return name
+    return None
 
 
 def _usable_stock_item_details(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -573,6 +605,10 @@ def _stock_items_collection_xml(company_name: str | None = None, group_name: str
             "Parent",
             "Category",
             "StockCategory",
+            "MailingName",
+            "PartNo",
+            "Alias",
+            "OnlyAlias",
             "BaseUnits",
             "AdditionalUnits",
             "OpeningBalance",

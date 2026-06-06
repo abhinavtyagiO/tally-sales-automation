@@ -234,6 +234,10 @@ class ConnectorRuntimeTests(unittest.TestCase):
                                 "BASEUNITS": "PC",
                                 "CLOSINGBALANCE": " 3 PC",
                                 "CLOSINGVALUE": "-4392.98",
+                                "MAILINGNAME.LIST": {
+                                    "MAILINGNAME": "145/70R12 69S ZCC TT",
+                                },
+                                "APPARTNO": "145/70R12 69S ZCC TT",
                                 "LANGUAGENAME.LIST": {
                                     "NAME.LIST": {
                                         "NAME": "18360620",
@@ -259,6 +263,8 @@ class ConnectorRuntimeTests(unittest.TestCase):
 
         self.assertEqual(result["summary"], {"stock_item_count": 1, "group_name": "MINI CAR RADIALS"})
         self.assertEqual(result["stock_items"][0]["name"], "18360620")
+        self.assertEqual(result["stock_items"][0]["display_name"], "145/70R12 69S ZCC TT")
+        self.assertEqual(result["stock_items"][0]["part_number"], "145/70R12 69S ZCC TT")
         self.assertEqual(result["stock_items"][0]["closing_balance"], "3 PC")
 
     def test_register_with_setup_token_persists_connector_config(self) -> None:

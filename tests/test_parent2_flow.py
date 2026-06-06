@@ -827,6 +827,32 @@ class Parent2FlowTests(unittest.TestCase):
         self.assertEqual(item["gst_rate"], 18)
         self.assertNotIn("raw", item)
 
+    def test_product_lookup_matches_stock_display_name_but_keeps_canonical_tally_name(self) -> None:
+        company = self.make_company()
+        database.replace_stock_items(
+            [
+                {
+                    "name": "18360620",
+                    "display_name": "145/70R12 69S ZCC TT",
+                    "part_number": "145/70R12 69S ZCC TT",
+                    "closing_balance": "3 PC",
+                    "base_unit": "PC",
+                    "gst_rate": 18,
+                    "taxability": "Taxable",
+                }
+            ],
+            company_id=company["id"],
+        )
+
+        stock = database.get_stock_item_by_name("145/70R12 69S ZCC TT (18360620)", company_id=company["id"])
+        display_stock = database.get_stock_item_by_name("145/70R12 69S ZCC TT", company_id=company["id"])
+
+        self.assertIsNotNone(stock)
+        self.assertIsNotNone(display_stock)
+        self.assertEqual(stock["name"], "18360620")
+        self.assertEqual(display_stock["name"], "18360620")
+        self.assertEqual(stock["display_name"], "145/70R12 69S ZCC TT")
+
     def test_import_rows_persist_and_process_validates_company_masters(self) -> None:
         company = self.make_company()
         self.seed_company_masters(company)
