@@ -1100,7 +1100,8 @@ function InventoryTable({ items }: { items: StockItem[] }) {
             return (
               <tr key={item.id} className={closingQuantity !== null && closingQuantity <= 5 ? "warning-row" : ""}>
                 <td>
-                  <strong>{item.name}</strong>
+                  <strong>{item.display_name || item.name}</strong>
+                  {item.display_name && item.display_name !== item.name && <span className="muted block-text">{item.name}</span>}
                 </td>
                 <td>{item.group_name || "-"}</td>
                 <td>{item.category ? <Badge tone="neutral">{item.category}</Badge> : "-"}</td>

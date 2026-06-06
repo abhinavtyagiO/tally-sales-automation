@@ -85,6 +85,8 @@ export type StockItem = {
   id: number;
   company_id: number;
   name: string;
+  display_name?: string | null;
+  part_number?: string | null;
   group_name?: string | null;
   category?: string | null;
   base_unit?: string | null;

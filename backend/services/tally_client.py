@@ -145,11 +145,7 @@ class TallyClient:
     def get_all_stock_items(self, company_name: str | None = None) -> list[dict[str, Any]]:
         data = self.export_stock_items(company_name) if company_name else self.export_data("Stock Items")
         items = _extract_collection(data, "StockItem")
-        return [
-            _stock_item_details(item)
-            for item in items
-            if _text_value(_get_ci(item, "Name") or _find_first(item, "Name"))
-        ]
+        return _usable_stock_item_details(items)
 
     def export_stock_items(self, company_name: str | None = None) -> dict[str, Any]:
         return self._post_xml(_stock_items_collection_xml(company_name))
@@ -269,12 +265,16 @@ def _text_value(value: Any) -> str | None:
             if text:
                 return text
         return None
-    return str(value)
+    text = str(value).strip()
+    return text or None
 
 
 def _stock_item_details(item: dict[str, Any]) -> dict[str, Any]:
+    part_number = _stock_item_part_number(item)
     return {
-        "name": _text_value(_get_ci(item, "Name") or _find_first(item, "Name")),
+        "name": _stock_item_name(item),
+        "display_name": _stock_item_display_name(item, part_number),
+        "part_number": part_number,
         "group_name": _text_value(_get_ci(item, "Parent") or _get_ci(item, "Group")),
         "category": _text_value(_get_ci(item, "Category") or _get_ci(item, "StockCategory")),
         "base_unit": _text_value(_get_ci(item, "BaseUnits") or _get_ci(item, "BaseUnit")),
@@ -298,6 +298,79 @@ def _stock_item_details(item: dict[str, Any]) -> dict[str, Any]:
         "hsn_description": _text_value(_get_ci(item, "GSTHSNDescription") or _find_first_text(item, "GSTHSNDescription")),
         "taxability": _text_value(_get_ci(item, "GSTOVRDNTaxability") or _get_ci(item, "Taxability") or _find_first(item, "GSTOVRDNTaxability") or _find_first(item, "Taxability")),
     }
+
+
+def _stock_item_display_name(item: dict[str, Any], part_number: str | None) -> str | None:
+    return (
+        _stock_item_mailing_name(item)
+        or _text_value(_get_ci(item, "DisplayName") or _get_ci(item, "DISPLAYNAME"))
+        or part_number
+        or _text_value(_get_ci(item, "Alias") or _get_ci(item, "OnlyAlias") or _get_ci(item, "APOnlyAlias"))
+    )
+
+
+def _stock_item_part_number(item: dict[str, Any]) -> str | None:
+    return _text_value(_get_ci(item, "PartNo") or _get_ci(item, "APPartNo"))
+
+
+def _stock_item_mailing_name(item: dict[str, Any]) -> str | None:
+    mailing_names = _get_ci(item, "MAILINGNAME.LIST")
+    if not mailing_names:
+        return None
+    if not isinstance(mailing_names, list):
+        mailing_names = [mailing_names]
+    for mailing_name in mailing_names:
+        if isinstance(mailing_name, dict):
+            name = _text_value(_get_ci(mailing_name, "MAILINGNAME"))
+        else:
+            name = _text_value(mailing_name)
+        if name:
+            return name
+    return None
+
+
+def _usable_stock_item_details(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    stock_items: list[dict[str, Any]] = []
+    for item in items:
+        details = _stock_item_details(item)
+        if _usable_stock_item(details):
+            stock_items.append(details)
+    return stock_items
+
+
+def _stock_item_name(item: dict[str, Any]) -> str | None:
+    language_name = _stock_item_language_name(item)
+    if language_name:
+        return language_name
+    return _text_value(_get_ci(item, "Name"))
+
+
+def _stock_item_language_name(item: dict[str, Any]) -> str | None:
+    language_names = _get_ci(item, "LANGUAGENAME.LIST")
+    if not language_names:
+        return None
+    if not isinstance(language_names, list):
+        language_names = [language_names]
+    for language_name in language_names:
+        if not isinstance(language_name, dict):
+            continue
+        name_list = _get_ci(language_name, "NAME.LIST")
+        if not name_list:
+            continue
+        if not isinstance(name_list, list):
+            name_list = [name_list]
+        for current in name_list:
+            if isinstance(current, dict):
+                name = _text_value(_get_ci(current, "NAME"))
+            else:
+                name = _text_value(current)
+            if name:
+                return name
+    return None
+
+
+def _usable_stock_item(item: dict[str, Any]) -> bool:
+    return bool(item.get("name") and item.get("closing_balance"))
 
 
 def _stock_group_details(item: dict[str, Any]) -> dict[str, Any]:
@@ -532,6 +605,10 @@ def _stock_items_collection_xml(company_name: str | None = None, group_name: str
             "Parent",
             "Category",
             "StockCategory",
+            "MailingName",
+            "PartNo",
+            "Alias",
+            "OnlyAlias",
             "BaseUnits",
             "AdditionalUnits",
             "OpeningBalance",

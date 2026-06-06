@@ -131,6 +131,7 @@ class ConnectorRuntimeTests(unittest.TestCase):
                             "STOCKITEM": {
                                 "NAME": "2.75-18 NGP",
                                 "PARENT": "Tyres",
+                                "CLOSINGBALANCE": "4 Nos",
                             }
                         }
                     }
@@ -191,8 +192,14 @@ class ConnectorRuntimeTests(unittest.TestCase):
                     "DATA": {
                         "COLLECTION": {
                             "STOCKITEM": {
-                                "NAME": "2.75-18 NGP",
+                                "NAME": "27104020",
                                 "PARENT": "Tyres",
+                                "CLOSINGBALANCE": "",
+                                "LANGUAGENAME.LIST": {
+                                    "NAME.LIST": {
+                                        "NAME": "27104020",
+                                    }
+                                },
                             }
                         }
                     }
@@ -211,8 +218,54 @@ class ConnectorRuntimeTests(unittest.TestCase):
             )
 
         client_class.return_value.export_stock_items_for_group.assert_called_once_with("Bhrama Enterprises", "Tyres")
-        self.assertEqual(result["summary"], {"stock_item_count": 1, "group_name": "Tyres"})
-        self.assertEqual(result["stock_items"][0]["name"], "2.75-18 NGP")
+        self.assertEqual(result["summary"], {"stock_item_count": 0, "group_name": "Tyres"})
+        self.assertEqual(result["stock_items"], [])
+
+    def test_stock_items_for_group_uses_language_name_and_keeps_items_with_closing_balance(self) -> None:
+        connector = PollingConnector(self.settings(), FakeTransport({"job": None}))
+        tally_response = {
+            "ENVELOPE": {
+                "BODY": {
+                    "DATA": {
+                        "COLLECTION": {
+                            "STOCKITEM": {
+                                "NAME": "18360620",
+                                "PARENT": "MINI CAR RADIALS",
+                                "BASEUNITS": "PC",
+                                "CLOSINGBALANCE": " 3 PC",
+                                "CLOSINGVALUE": "-4392.98",
+                                "MAILINGNAME.LIST": {
+                                    "MAILINGNAME": "145/70R12 69S ZCC TT",
+                                },
+                                "APPARTNO": "145/70R12 69S ZCC TT",
+                                "LANGUAGENAME.LIST": {
+                                    "NAME.LIST": {
+                                        "NAME": "18360620",
+                                    },
+                                    "LANGUAGEID": "1033",
+                                },
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        with patch("connector.main.TallyClient") as client_class:
+            client_class.return_value.export_stock_items_for_group.return_value = tally_response
+            result = connector.dispatch(
+                {
+                    "id": 1,
+                    "operation": "sync_stock_items_for_group",
+                    "payload": {"company_name": "Bhrama Enterprises", "group_name": "MINI CAR RADIALS", "tally_url": "http://127.0.0.1:9000"},
+                }
+            )
+
+        self.assertEqual(result["summary"], {"stock_item_count": 1, "group_name": "MINI CAR RADIALS"})
+        self.assertEqual(result["stock_items"][0]["name"], "18360620")
+        self.assertEqual(result["stock_items"][0]["display_name"], "145/70R12 69S ZCC TT")
+        self.assertEqual(result["stock_items"][0]["part_number"], "145/70R12 69S ZCC TT")
+        self.assertEqual(result["stock_items"][0]["closing_balance"], "3 PC")
 
     def test_register_with_setup_token_persists_connector_config(self) -> None:
         transport = FakeRegistrationTransport()

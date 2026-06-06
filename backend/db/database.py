@@ -104,6 +104,8 @@ def init_db() -> None:
                 company_id INTEGER NOT NULL,
                 stock_group_id INTEGER,
                 name TEXT NOT NULL,
+                display_name TEXT,
+                part_number TEXT,
                 group_name TEXT,
                 category TEXT,
                 base_unit TEXT,
@@ -328,6 +330,8 @@ def _migrate_existing_tables(connection: sqlite3.Connection) -> None:
         ("local_agents", "setup_expires_at", "TEXT"),
         ("stock_items", "group_name", "TEXT"),
         ("stock_items", "stock_group_id", "INTEGER"),
+        ("stock_items", "display_name", "TEXT"),
+        ("stock_items", "part_number", "TEXT"),
         ("stock_items", "category", "TEXT"),
         ("stock_items", "base_unit", "TEXT"),
         ("stock_items", "additional_unit", "TEXT"),
@@ -401,6 +405,8 @@ def _migrate_master_table_uniqueness(connection: sqlite3.Connection) -> None:
                     company_id INTEGER NOT NULL,
                     stock_group_id INTEGER,
                     name TEXT NOT NULL,
+                    display_name TEXT,
+                    part_number TEXT,
                     group_name TEXT,
                     category TEXT,
                     base_unit TEXT,
@@ -1229,18 +1235,20 @@ def replace_stock_items_for_group(items: Iterable[str | dict[str, Any]], company
         connection.executemany(
             """
             INSERT OR IGNORE INTO stock_items (
-                company_id, stock_group_id, name, group_name, category, base_unit, additional_unit,
+                company_id, stock_group_id, name, display_name, part_number, group_name, category, base_unit, additional_unit,
                 opening_balance, closing_balance, opening_value, closing_value,
                 opening_rate, closing_rate, gst_type, gst_rate, hsn_code,
                 hsn_description, taxability, raw_json
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             [
                 (
                     company_id,
                     stock_group_id,
                     item["name"],
+                    item.get("display_name"),
+                    item.get("part_number"),
                     item.get("group_name") or group_name,
                     item.get("category"),
                     item.get("base_unit"),
@@ -1281,18 +1289,20 @@ def replace_stock_items(items: Iterable[str | dict[str, Any]], company_id: int |
         connection.executemany(
             """
             INSERT OR IGNORE INTO stock_items (
-                company_id, stock_group_id, name, group_name, category, base_unit, additional_unit,
+                company_id, stock_group_id, name, display_name, part_number, group_name, category, base_unit, additional_unit,
                 opening_balance, closing_balance, opening_value, closing_value,
                 opening_rate, closing_rate, gst_type, gst_rate, hsn_code,
                 hsn_description, taxability, raw_json
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             [
                 (
                     company_id,
                     None,
                     item["name"],
+                    item.get("display_name"),
+                    item.get("part_number"),
                     item.get("group_name"),
                     item.get("category"),
                     item.get("base_unit"),
@@ -1345,6 +1355,8 @@ def _normalize_stock_item(item: str | dict[str, Any]) -> dict[str, Any]:
     name = str(item.get("name") or item.get("Name") or "").strip()
     return {
         "name": name,
+        "display_name": _clean_optional(item.get("display_name") or item.get("displayName") or item.get("MailingName") or item.get("MAILINGNAME")),
+        "part_number": _clean_optional(item.get("part_number") or item.get("partNumber") or item.get("PartNo") or item.get("APPartNo")),
         "group_name": _clean_optional(item.get("group_name") or item.get("group") or item.get("Parent")),
         "category": _clean_optional(item.get("category") or item.get("StockCategory") or item.get("Category")),
         "base_unit": _clean_optional(item.get("base_unit") or item.get("baseUnit") or item.get("BaseUnits")),
@@ -1412,11 +1424,48 @@ def upsert_ledger(name: str, group_name: str | None, company_id: int | None = No
 
 def get_stock_item_by_name(name: str, company_id: int | None = None) -> sqlite3.Row | None:
     company_id = company_id or ensure_legacy_company()["id"]
+    normalized_name = name.strip()
     with get_connection() as connection:
-        return connection.execute(
-            "SELECT * FROM stock_items WHERE company_id = ? AND lower(name) = lower(?)",
-            (company_id, name),
+        stock = connection.execute(
+            """
+            SELECT *
+            FROM stock_items
+            WHERE company_id = ?
+              AND lower(name) = lower(?)
+            LIMIT 1
+            """,
+            (company_id, normalized_name),
         ).fetchone()
+        if stock:
+            return stock
+
+        stock = connection.execute(
+            """
+            SELECT *
+            FROM stock_items
+            WHERE company_id = ?
+              AND lower(display_name || ' (' || name || ')') = lower(?)
+            LIMIT 1
+            """,
+            (company_id, normalized_name),
+        ).fetchone()
+        if stock:
+            return stock
+
+        matches = connection.execute(
+            """
+            SELECT *
+            FROM stock_items
+            WHERE company_id = ?
+              AND (lower(display_name) = lower(?) OR lower(part_number) = lower(?))
+            ORDER BY id
+            LIMIT 2
+            """,
+            (company_id, normalized_name, normalized_name),
+        ).fetchall()
+        if len(matches) == 1:
+            return matches[0]
+        return None
 
 
 def get_ledger_by_name(name: str, company_id: int | None = None) -> sqlite3.Row | None:
