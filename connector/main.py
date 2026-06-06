@@ -12,7 +12,7 @@ from typing import Any, Protocol
 import requests
 
 from backend import config
-from backend.services.tally_client import TallyClient, TallyError, _extract_collection, _ledger_details, _stock_group_details, _stock_item_details
+from backend.services.tally_client import TallyClient, TallyError, _extract_collection, _ledger_details, _stock_group_details, _stock_item_details, _usable_stock_item
 
 
 logger = logging.getLogger("accountpilot.connector")
@@ -147,7 +147,7 @@ class PollingConnector:
         if operation == "sync_stock_items":
             data = client.export_stock_items(company_name)
             stock_items = [_stock_item_details(item) for item in _extract_collection(data, "StockItem")]
-            stock_items = [item for item in stock_items if item.get("name")]
+            stock_items = [item for item in stock_items if _usable_stock_item(item)]
             logger.info("connector.master_export operation=%s company_name=%s count=%s", operation, company_name, len(stock_items))
             return {"stock_items": stock_items, "summary": {"stock_item_count": len(stock_items)}}
         if operation == "sync_stock_groups":
@@ -162,7 +162,7 @@ class PollingConnector:
                 raise TallyError("Stock group name is required")
             data = client.export_stock_items_for_group(company_name, group_name)
             stock_items = [_stock_item_details(item) for item in _extract_collection(data, "StockItem")]
-            stock_items = [item for item in stock_items if item.get("name")]
+            stock_items = [item for item in stock_items if _usable_stock_item(item)]
             logger.info("connector.master_export operation=%s company_name=%s group_name=%s count=%s", operation, company_name, group_name, len(stock_items))
             return {"stock_items": stock_items, "summary": {"stock_item_count": len(stock_items), "group_name": group_name}}
         if operation == "create_sales_voucher":

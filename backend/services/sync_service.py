@@ -155,7 +155,7 @@ def _extract_agent_ledgers(response: dict[str, Any]) -> list[dict[str, Any]]:
 def _extract_agent_stock_items(response: dict[str, Any]) -> list[dict[str, Any] | str]:
     if "stock_items" in response:
         return response["stock_items"]
-    from backend.services.tally_client import _extract_collection, _stock_item_details
+    from backend.services.tally_client import _extract_collection, _stock_item_details, _usable_stock_item
 
     stock_items = [_stock_item_details(item) for item in _extract_collection(response, "StockItem")]
-    return [item for item in stock_items if item.get("name")]
+    return [item for item in stock_items if _usable_stock_item(item)]
