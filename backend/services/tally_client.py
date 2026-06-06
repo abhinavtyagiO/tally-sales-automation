@@ -145,8 +145,7 @@ class TallyClient:
     def get_all_stock_items(self, company_name: str | None = None) -> list[dict[str, Any]]:
         data = self.export_stock_items(company_name) if company_name else self.export_data("Stock Items")
         items = _extract_collection(data, "StockItem")
-        stock_items = [_stock_item_details(item) for item in items]
-        return [item for item in stock_items if _usable_stock_item(item)]
+        return _usable_stock_item_details(items)
 
     def export_stock_items(self, company_name: str | None = None) -> dict[str, Any]:
         return self._post_xml(_stock_items_collection_xml(company_name))
@@ -296,6 +295,15 @@ def _stock_item_details(item: dict[str, Any]) -> dict[str, Any]:
         "hsn_description": _text_value(_get_ci(item, "GSTHSNDescription") or _find_first_text(item, "GSTHSNDescription")),
         "taxability": _text_value(_get_ci(item, "GSTOVRDNTaxability") or _get_ci(item, "Taxability") or _find_first(item, "GSTOVRDNTaxability") or _find_first(item, "Taxability")),
     }
+
+
+def _usable_stock_item_details(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    stock_items: list[dict[str, Any]] = []
+    for item in items:
+        details = _stock_item_details(item)
+        if _usable_stock_item(details):
+            stock_items.append(details)
+    return stock_items
 
 
 def _stock_item_name(item: dict[str, Any]) -> str | None:

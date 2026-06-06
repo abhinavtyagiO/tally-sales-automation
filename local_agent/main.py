@@ -6,7 +6,7 @@ from fastapi import FastAPI, Header, HTTPException
 from pydantic import BaseModel
 
 from backend import config
-from backend.services.tally_client import TallyClient, TallyError, _extract_collection, _ledger_details, _stock_group_details, _stock_item_details, _usable_stock_item
+from backend.services.tally_client import TallyClient, TallyError, _extract_collection, _ledger_details, _stock_group_details, _usable_stock_item_details
 
 
 app = FastAPI(title="Tally Sales Automation Local Agent", version="0.1.0")
@@ -44,8 +44,7 @@ def execute(request: ExecuteRequest, x_accountpilot_agent_token: Optional[str] =
                 return {"ledgers": ledgers, "summary": {"ledger_count": len(ledgers)}}
             if collection_id.lower() == "stockitem":
                 data = client.export_stock_items(company_name)
-                stock_items = [_stock_item_details(item) for item in _extract_collection(data, "StockItem")]
-                stock_items = [item for item in stock_items if _usable_stock_item(item)]
+                stock_items = _usable_stock_item_details(_extract_collection(data, "StockItem"))
                 return {"stock_items": stock_items, "summary": {"stock_item_count": len(stock_items)}}
             if collection_id.lower() == "stockgroup":
                 data = client.export_stock_groups(company_name)
@@ -59,8 +58,7 @@ def execute(request: ExecuteRequest, x_accountpilot_agent_token: Optional[str] =
             if not group_name:
                 raise TallyError("Stock group name is required")
             data = client.export_stock_items_for_group(company_name, group_name)
-            stock_items = [_stock_item_details(item) for item in _extract_collection(data, "StockItem")]
-            stock_items = [item for item in stock_items if _usable_stock_item(item)]
+            stock_items = _usable_stock_item_details(_extract_collection(data, "StockItem"))
             return {"stock_items": stock_items, "summary": {"stock_item_count": len(stock_items), "group_name": group_name}}
         if request.operation == "create_sales_voucher":
             return client.create_sales_voucher(request.payload["voucher"], company_name=company_name)
