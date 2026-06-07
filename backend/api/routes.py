@@ -600,12 +600,13 @@ def preview_single_voucher(company_id: int, request: CreateVoucherRequest, user:
     )
     preview = _build_single_voucher_preview(company, row, import_type, user["id"])
     logger.info(
-        "single_voucher.preview.completed user_id=%s company_id=%s import_type=%s valid=%s stock_item=%s",
+        "single_voucher.preview.completed user_id=%s company_id=%s import_type=%s valid=%s stock_item=%s error=%s",
         user["id"],
         company_id,
         import_type,
         preview["valid"],
         _preview_stock_name(preview.get("voucher")),
+        preview["row"].get("validation_error"),
     )
     return preview
 
