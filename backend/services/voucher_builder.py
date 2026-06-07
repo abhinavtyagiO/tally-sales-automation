@@ -61,11 +61,13 @@ def build_vouchers(
         stock = dict(stock_item)
         try:
             voucher_date = _parse_voucher_date(row.get("voucher_date"))
+            quantity = _positive_float(row.get("quantity") or 1, "quantity")
             party_ledger = _resolve_party_ledger(str(row.get("payment_mode", "")).lower(), ensure_ledgers, company=company)
             source = _build_source(row, index, voucher_date, company_id=company_id, user_id=user_id)
             voucher = _build_sales_voucher(
                 stock_item_name=stock["name"],
                 price=float(row["price"]),
+                quantity=quantity,
                 payment_mode=str(row["payment_mode"]).lower(),
                 voucher_date=voucher_date.isoformat(),
                 party_ledger=party_ledger,
@@ -208,6 +210,7 @@ def _ensure_ledger_exists(name: str, group_name: str, company: dict[str, Any] | 
 def _build_sales_voucher(
     stock_item_name: str,
     price: float,
+    quantity: float,
     payment_mode: str,
     voucher_date: str,
     party_ledger: str,
@@ -219,6 +222,7 @@ def _build_sales_voucher(
     tax = _calculate_inclusive_cgst_sgst(price, stock_item)
     sales_amount = tax["taxable_amount"]
     invoice_total = tax["invoice_total"]
+    unit_rate = round(sales_amount / quantity, 2)
     cgst_ledger = _company_value(company, "cgst_ledger_name", config.CGST_LEDGER_NAME)
     sgst_ledger = _company_value(company, "sgst_ledger_name", config.SGST_LEDGER_NAME)
     return {
@@ -237,9 +241,9 @@ def _build_sales_voucher(
         "InventoryEntries": [
             {
                 "StockItemName": stock_item_name,
-                "Rate": sales_amount,
+                "Rate": unit_rate,
                 "Amount": sales_amount,
-                "Quantity": 1,
+                "Quantity": quantity,
                 "Unit": stock_item.get("base_unit") or "nos",
                 "HSNCode": stock_item.get("hsn_code") or "",
                 "GSTType": stock_item.get("gst_type") or "Goods",
@@ -307,6 +311,16 @@ def _positive_or_zero(value: Any, label: str) -> float:
     return parsed
 
 
+def _positive_float(value: Any, label: str) -> float:
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError) as exc:
+        raise VoucherBuildError(f"{label} must be a positive number") from exc
+    if parsed <= 0:
+        raise VoucherBuildError(f"{label} must be a positive number")
+    return parsed
+
+
 def _validate_voucher(voucher: dict[str, Any]) -> None:
     if voucher.get("VoucherTypeName") != "Sales":
         raise VoucherBuildError("VoucherTypeName must be Sales")
@@ -346,6 +360,7 @@ def _build_source(row: dict[str, Any], index: int, voucher_date: date, company_i
         "source_row_id": source_row_id,
         "product_name": str(row.get("product_name", "")).strip().lower(),
         "price": round(float(row.get("price", 0)), 2),
+        "quantity": round(float(row.get("quantity") or 1), 4),
         "payment_mode": str(row.get("payment_mode", "")).strip().lower(),
         "voucher_date": voucher_date.isoformat(),
     }

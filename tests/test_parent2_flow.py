@@ -912,6 +912,97 @@ class Parent2FlowTests(unittest.TestCase):
         self.assertEqual(row["total_amount"], 1575)
         self.assertEqual(row["voucher_preview"]["VoucherKind"], IMPORT_TYPE_GST)
 
+    def test_single_walk_in_voucher_preview_uses_existing_retail_builder(self) -> None:
+        company = self.make_company()
+        self.seed_company_masters(company)
+
+        result = routes.preview_single_voucher(
+            company["id"],
+            routes.CreateVoucherRequest(
+                voucher_type="walk_in",
+                product_name="2.75-18 NGP",
+                quantity=2,
+                price=1600,
+                payment_mode="Card",
+                voucher_date="2026-05-31",
+            ),
+            user=self.user,
+        )
+
+        self.assertTrue(result["valid"])
+        self.assertEqual(result["row"]["validation_status"], "valid")
+        self.assertEqual(result["row"]["quantity"], 2)
+        self.assertEqual(result["row"]["cgst_amount"], 122.03)
+        self.assertEqual(result["row"]["sgst_amount"], 122.04)
+        self.assertEqual(result["voucher"]["InventoryEntries"][0]["StockItemName"], "2.75-18 NGP")
+        self.assertEqual(result["voucher"]["PartyLedgerName"], "Card")
+
+    def test_single_gst_firm_voucher_preview_uses_existing_gst_builder(self) -> None:
+        company = self.make_company()
+        database.update_company(
+            company["id"],
+            self.user["id"],
+            {"supplier_gstin": "29AAECP4424C1ZN", "supplier_state": "Karnataka"},
+        )
+        company = database.get_company(company["id"], user_id=self.user["id"])
+        database.replace_stock_items(
+            [{"name": "GST Coffee", "base_unit": "nos", "gst_rate": 5, "taxability": "Taxable"}],
+            company_id=company["id"],
+        )
+
+        result = routes.preview_single_voucher(
+            company["id"],
+            routes.CreateVoucherRequest(
+                voucher_type="gst_firm",
+                product_name="GST Coffee",
+                quantity=20,
+                price=75,
+                voucher_date="2026-05-31",
+                buyer_name="Chanda Enterprises",
+                buyer_gstin="29AAACH1004N1ZQ",
+                buyer_state="Karnataka",
+            ),
+            user=self.user,
+        )
+
+        self.assertTrue(result["valid"])
+        self.assertEqual(result["row"]["taxable_amount"], 1500)
+        self.assertEqual(result["row"]["total_amount"], 1575)
+        self.assertEqual(result["voucher"]["PartyLedgerName"], "Chanda Enterprises")
+
+    def test_single_voucher_create_persists_one_row_and_queues_polling_commit_run(self) -> None:
+        original_mode = config.CONNECTOR_MODE
+        config.CONNECTOR_MODE = "polling"
+        self.addCleanup(lambda: setattr(config, "CONNECTOR_MODE", original_mode))
+        company = self.make_company()
+        agent = self.make_token_agent()
+        database.update_company(company["id"], self.user["id"], {"local_agent_id": agent["id"]})
+        company = database.get_company(company["id"], user_id=self.user["id"])
+        self.seed_company_masters(company, include_upi=False)
+
+        result = routes.create_single_voucher(
+            company["id"],
+            routes.CreateVoucherRequest(
+                voucher_type="walk_in",
+                product_name="2.75-18 NGP",
+                quantity=1,
+                price=1600,
+                payment_mode="Card",
+                voucher_date="2026-05-31",
+            ),
+            background_tasks=None,
+            user=self.user,
+        )
+
+        self.assertEqual(result["import"]["filename"], "Single Voucher - Walk-in Customer")
+        self.assertEqual(result["import"]["row_count"], 1)
+        self.assertEqual(result["rows"][0]["validation_status"], "valid")
+        self.assertEqual(result["commit_run"]["status"], "processing")
+        jobs = database.list_connector_jobs_for_commit_run(result["commit_run"]["id"])
+        self.assertEqual([job["operation"] for job in jobs], ["create_ledger", "create_sales_voucher"])
+        self.assertEqual(jobs[0]["payload"]["name"], "Card")
+        self.assertEqual(jobs[1]["payload"]["voucher"]["Source"]["import_row_id"], result["rows"][0]["id"])
+
     def test_gst_import_commit_creates_required_ledgers_and_dispatches_gst_voucher(self) -> None:
         company = self.make_company()
         agent = self.make_agent()

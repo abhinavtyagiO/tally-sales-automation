@@ -1083,6 +1083,135 @@ h3 {
   align-items: start;
 }
 
+.create-voucher-layout {
+  grid-template-columns: minmax(0, 1.6fr) minmax(340px, 0.8fr);
+  align-items: start;
+}
+
+.create-voucher-main,
+.create-voucher-form {
+  display: grid;
+  gap: 24px;
+}
+
+.form-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 18px;
+}
+
+.form-grid label {
+  display: grid;
+  gap: 8px;
+}
+
+.form-grid label > span {
+  color: var(--muted);
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.form-grid input,
+.form-grid select {
+  width: 100%;
+  min-width: 0;
+}
+
+.wide-field {
+  grid-column: 1 / -1;
+}
+
+.product-combobox {
+  position: relative;
+}
+
+.product-search-control {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface);
+  padding: 0 12px;
+}
+
+.product-search-control input {
+  border: 0;
+  min-width: 0;
+  width: 100%;
+  padding-left: 0;
+}
+
+.product-search-control input:focus {
+  outline: 0;
+}
+
+.product-results {
+  position: absolute;
+  z-index: 10;
+  inset: calc(100% + 6px) 0 auto 0;
+  max-height: 320px;
+  overflow: auto;
+  display: grid;
+  gap: 0;
+  background: var(--surface);
+  border: 1px solid var(--border-soft);
+  border-radius: 8px;
+  box-shadow: var(--shadow);
+}
+
+.product-result {
+  border: 0;
+  border-radius: 0;
+  min-height: 56px;
+  display: grid;
+  justify-items: start;
+  gap: 2px;
+  text-align: left;
+  padding: 10px 14px;
+}
+
+.product-result + .product-result {
+  border-top: 1px solid var(--border-soft);
+}
+
+.product-result span,
+.product-empty {
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.product-empty {
+  padding: 14px;
+  margin: 0;
+}
+
+.voucher-preview-list {
+  display: grid;
+  gap: 14px;
+}
+
+.voucher-preview-list p {
+  margin: 0;
+  display: grid;
+  gap: 4px;
+}
+
+.voucher-preview-list span {
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.button-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+}
+
+.button-row button {
+  flex: 1;
+}
+
 .upload-type-grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -1390,9 +1519,14 @@ tr:last-child td {
 
   .dashboard-grid,
   .upload-layout,
+  .create-voucher-layout,
   .commit-layout,
   .action-grid,
   .stats-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .form-grid {
     grid-template-columns: 1fr;
   }
 }

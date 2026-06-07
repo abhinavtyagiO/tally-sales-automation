@@ -149,6 +149,7 @@ class SaleRow(BaseModel):
     product_name: str
     price: float = Field(gt=0)
     payment_mode: str
+    quantity: float = Field(default=1, gt=0)
     voucher_date: Optional[date] = None
     source_row_id: Optional[str] = None
 
@@ -164,6 +165,20 @@ class CommitRequest(BaseModel):
     voucher_date: Optional[date] = None
     import_id: Optional[str] = None
     import_row_ids: Optional[list[int]] = None
+
+
+class CreateVoucherRequest(BaseModel):
+    voucher_type: str
+    product_name: str
+    quantity: float = Field(gt=0)
+    price: float = Field(gt=0)
+    payment_mode: Optional[str] = None
+    voucher_date: Optional[date] = None
+    buyer_name: Optional[str] = None
+    buyer_gstin: Optional[str] = None
+    buyer_state: Optional[str] = None
+    buyer_address: Optional[str] = None
+    place_of_supply: Optional[str] = None
 
 
 @router.post("/auth/google")
@@ -572,6 +587,81 @@ def company_stock_group_items_by_name(company_id: int, group_name: str = Query(.
     }
 
 
+@router.post("/companies/{company_id}/single-vouchers/preview")
+def preview_single_voucher(company_id: int, request: CreateVoucherRequest, user: dict[str, Any] = Depends(auth_service.get_current_user)) -> dict[str, Any]:
+    company = require_company(user["id"], company_id)
+    import_type, row = _single_voucher_import_row(request)
+    logger.info(
+        "single_voucher.preview.start user_id=%s company_id=%s import_type=%s product_name=%s",
+        user["id"],
+        company_id,
+        import_type,
+        row["product_name"],
+    )
+    preview = _build_single_voucher_preview(company, row, import_type, user["id"])
+    logger.info(
+        "single_voucher.preview.completed user_id=%s company_id=%s import_type=%s valid=%s stock_item=%s",
+        user["id"],
+        company_id,
+        import_type,
+        preview["valid"],
+        _preview_stock_name(preview.get("voucher")),
+    )
+    return preview
+
+
+@router.post("/companies/{company_id}/single-vouchers")
+def create_single_voucher(
+    company_id: int,
+    request: CreateVoucherRequest,
+    background_tasks: BackgroundTasks,
+    user: dict[str, Any] = Depends(auth_service.get_current_user),
+) -> dict[str, Any]:
+    company = require_company(user["id"], company_id)
+    import_type, row = _single_voucher_import_row(request)
+    _ensure_single_voucher_ready(user["id"], company)
+    preview = _build_single_voucher_preview(company, row, import_type, user["id"])
+    if preview["row"]["validation_status"] != "valid":
+        logger.warning(
+            "single_voucher.create.validation_failed user_id=%s company_id=%s import_type=%s product_name=%s error=%s",
+            user["id"],
+            company_id,
+            import_type,
+            row["product_name"],
+            preview["row"].get("validation_error"),
+        )
+        raise HTTPException(status_code=400, detail=preview["row"].get("validation_error") or "Voucher details are invalid")
+    filename = "Single Voucher - GST Firm" if import_type == IMPORT_TYPE_GST else "Single Voucher - Walk-in Customer"
+    import_record = database.create_import(user["id"], company_id, filename, [row], import_type=import_type)
+    processed = _process_import_rows(company, int(import_record["id"]), user)
+    valid_rows = [item for item in processed["rows"] if item["validation_status"] == "valid"]
+    if not valid_rows:
+        first_error = next((item.get("validation_error") for item in processed["rows"] if item.get("validation_error")), "Voucher details are invalid")
+        logger.warning(
+            "single_voucher.create.process_failed user_id=%s company_id=%s import_id=%s import_type=%s error=%s",
+            user["id"],
+            company_id,
+            import_record["id"],
+            import_type,
+            first_error,
+        )
+        raise HTTPException(status_code=400, detail=first_error)
+    logger.info(
+        "single_voucher.create.start user_id=%s company_id=%s import_id=%s import_type=%s stock_item=%s",
+        user["id"],
+        company_id,
+        import_record["id"],
+        import_type,
+        _preview_stock_name(preview.get("voucher")),
+    )
+    started = start_commit_run(company_id, int(import_record["id"]), CommitRequest(), background_tasks, user)
+    return {
+        "import": processed["import"],
+        "rows": processed["rows"],
+        "commit_run": started["commit_run"],
+    }
+
+
 @router.post("/companies/{company_id}/stock-groups/{stock_group_id}/retry")
 def retry_company_stock_group(company_id: int, stock_group_id: int, user: dict[str, Any] = Depends(auth_service.get_current_user)) -> dict[str, Any]:
     company = require_company(user["id"], company_id)
@@ -940,6 +1030,7 @@ def _row_to_sale(row: dict[str, Any]) -> dict[str, Any]:
     return {
         "product_name": row["product_name"],
         "price": row["price"],
+        "quantity": row.get("quantity") or 1,
         "payment_mode": row["payment_mode"],
         "voucher_date": row["voucher_date"],
         "source_row_id": row["source_row_id"],
@@ -965,6 +1056,135 @@ def _row_to_gst(row: dict[str, Any]) -> dict[str, Any]:
         "import_id": row["import_id"],
         "import_row_id": row["id"],
     }
+
+
+def _single_voucher_import_row(request: CreateVoucherRequest) -> tuple[str, dict[str, Any]]:
+    voucher_type = request.voucher_type.strip().lower().replace("-", "_").replace(" ", "_")
+    product_name = request.product_name.strip()
+    if not product_name:
+        raise HTTPException(status_code=400, detail="Product is required")
+    selected_date = (request.voucher_date or date.today()).isoformat()
+    if voucher_type in {"walk_in", "walk_in_customer", "retail", "retail_sales", "individual_customer"}:
+        payment_mode = str(request.payment_mode or "").strip()
+        if not payment_mode:
+            raise HTTPException(status_code=400, detail="Payment mode is required")
+        return IMPORT_TYPE_RETAIL, {
+            "source_row_id": "single",
+            "product_name": product_name,
+            "price": request.price,
+            "quantity": request.quantity,
+            "payment_mode": payment_mode,
+            "voucher_date": selected_date,
+        }
+    if voucher_type in {"gst_firm", "gst_tax_invoice", "gst", "business_customer"}:
+        buyer_name = str(request.buyer_name or "").strip()
+        buyer_gstin = str(request.buyer_gstin or "").strip().upper()
+        buyer_state = str(request.buyer_state or "").strip()
+        if not buyer_name:
+            raise HTTPException(status_code=400, detail="Customer/Firm is required")
+        if not validate_gstin(buyer_gstin):
+            raise HTTPException(status_code=400, detail="Customer GSTIN must be valid")
+        if not buyer_state:
+            raise HTTPException(status_code=400, detail="Customer state is required")
+        return IMPORT_TYPE_GST, {
+            "source_row_id": "single",
+            "product_name": product_name,
+            "price": request.price,
+            "quantity": request.quantity,
+            "rate": request.price,
+            "payment_mode": str(request.payment_mode or "credit").strip().lower() or "credit",
+            "voucher_date": selected_date,
+            "buyer_name": buyer_name,
+            "buyer_gstin": buyer_gstin,
+            "buyer_state": buyer_state,
+            "buyer_address": str(request.buyer_address or "").strip(),
+            "place_of_supply": str(request.place_of_supply or buyer_state).strip(),
+        }
+    raise HTTPException(status_code=400, detail="Unsupported voucher type")
+
+
+def _build_single_voucher_preview(company: dict[str, Any], row: dict[str, Any], import_type: str, user_id: int) -> dict[str, Any]:
+    try:
+        if import_type == IMPORT_TYPE_GST:
+            result = build_gst_invoices([row], company=company, user_id=user_id)
+        else:
+            result = build_vouchers([row], ensure_ledgers=False, company=company, user_id=user_id)
+    except (VoucherBuildError, GstInvoiceError) as exc:
+        result = type("_SingleVoucherBuildResult", (), {"vouchers": [], "errors": [{"row": 0, "error": str(exc)}]})()
+    voucher = result.vouchers[0] if result.vouchers else None
+    error = result.errors[0]["error"] if result.errors else None
+    preview_row = _single_voucher_preview_row(row, voucher, error)
+    return {
+        "voucher": voucher,
+        "row": preview_row,
+        "rows": [preview_row],
+        "valid": bool(voucher),
+    }
+
+
+def _single_voucher_preview_row(row: dict[str, Any], voucher: dict[str, Any] | None, error: str | None) -> dict[str, Any]:
+    tax = (voucher or {}).get("TaxSplit") or {}
+    return {
+        "id": 0,
+        "source_row_id": str(row.get("source_row_id") or "single"),
+        "product_name": row["product_name"],
+        "price": row["price"],
+        "quantity": row.get("quantity"),
+        "rate": row.get("rate"),
+        "payment_mode": row.get("payment_mode") or "",
+        "voucher_date": row["voucher_date"],
+        "buyer_name": row.get("buyer_name"),
+        "buyer_gstin": row.get("buyer_gstin"),
+        "buyer_state": row.get("buyer_state"),
+        "buyer_address": row.get("buyer_address"),
+        "place_of_supply": row.get("place_of_supply"),
+        "taxable_amount": tax.get("taxable_amount"),
+        "gst_rate": tax.get("gst_rate"),
+        "cgst_amount": tax.get("cgst_amount"),
+        "sgst_amount": tax.get("sgst_amount"),
+        "igst_amount": tax.get("igst_amount"),
+        "total_amount": tax.get("invoice_total"),
+        "validation_status": "valid" if voucher else "invalid",
+        "validation_error": error,
+        "commit_status": "pending",
+        "commit_error": None,
+    }
+
+
+def _ensure_single_voucher_ready(user_id: int, company: dict[str, Any]) -> None:
+    if config.CONNECTOR_MODE == "polling":
+        company_has_online_agent(company)
+        sync_result = get_master_sync_status(int(company["id"]))
+        sync_status = sync_result.get("status")
+        sync_state = sync_status.get("status") if isinstance(sync_status, dict) else sync_status
+        if sync_state == "not_requested" and company.get("last_sync_status") == "success":
+            sync_state = "completed"
+        if sync_state != "completed":
+            logger.warning(
+                "single_voucher.blocked_pending_sync user_id=%s company_id=%s sync_status=%s",
+                user_id,
+                company["id"],
+                sync_state,
+            )
+            raise HTTPException(status_code=409, detail="Tally master sync is still running. Please try again in a few seconds.")
+        if database.list_stock_groups(int(company["id"])) and not database.stock_item_sync_is_terminal(int(company["id"])):
+            logger.warning("single_voucher.blocked_pending_stock_items user_id=%s company_id=%s", user_id, company["id"])
+            raise HTTPException(status_code=409, detail="Stock items are still syncing in the background. Create Voucher will unlock once all stock groups finish.")
+        return
+    try:
+        ensure_tally_reachable(user_id)
+    except TallyError as exc:
+        logger.warning("single_voucher.tally_unreachable user_id=%s company_id=%s error=%r", user_id, company["id"], exc)
+        raise _friendly_tally_exception(exc) from exc
+
+
+def _preview_stock_name(voucher: Any) -> str | None:
+    if not isinstance(voucher, dict):
+        return None
+    entries = voucher.get("InventoryEntries") or []
+    if not entries:
+        return None
+    return entries[0].get("StockItemName")
 
 
 def _process_import_rows(company: dict[str, Any], import_id: int, user: dict[str, Any]) -> dict[str, Any]:

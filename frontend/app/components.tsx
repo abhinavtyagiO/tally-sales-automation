@@ -1,6 +1,6 @@
 "use client";
 
-import { ChangeEvent, useMemo, useState } from "react";
+import { ChangeEvent, useEffect, useMemo, useState } from "react";
 import {
   ArrowLeft,
   BarChart3,
@@ -13,6 +13,7 @@ import {
   History,
   LogOut,
   Package,
+  Plus,
   RefreshCw,
   Search,
   Upload,
@@ -36,7 +37,7 @@ import {
   tallyIsChecking,
 } from "./lib/derivations";
 import { INDIAN_GST_STATES } from "./lib/gst";
-import type { AppView, CommitRun, CommitSummary, Company, HelperStatus, ImportPreview, ImportRecord, ImportRow, ImportType, StockGroup, StockGroupItemsResponse, StockGroupsResponse, StockItem, TallyCompanies, TallyStatus, User } from "./lib/types";
+import type { AppView, CommitRun, CommitSummary, Company, HelperStatus, ImportPreview, ImportRecord, ImportRow, ImportType, SingleVoucherDraft, SingleVoucherPreview, StockGroup, StockGroupItemsResponse, StockGroupsResponse, StockItem, TallyCompanies, TallyStatus, User } from "./lib/types";
 
 type ImportDetails = Record<number, ImportRow[]>;
 const INVENTORY_PAGE_SIZE = 15;
@@ -130,11 +131,12 @@ export function AppShell({
         <nav className="nav-list" aria-label="Primary navigation">
           <NavButton icon={<BarChart3 size={18} />} label="Dashboard" active={activeView === "dashboard"} disabled={!companies.length} onClick={() => setActiveView("dashboard")} />
           <NavButton icon={<Package size={18} />} label="Inventory" active={activeView === "inventory"} disabled={!companies.length} onClick={() => setActiveView("inventory")} />
+          <NavButton icon={<Plus size={18} />} label="Create Voucher" active={activeView === "createVoucher"} disabled={!companies.length} onClick={() => setActiveView("createVoucher")} />
           <NavButton icon={<Upload size={18} />} label="Upload" active={activeView === "upload" || activeView === "preview"} disabled={!companies.length} onClick={() => setActiveView("upload")} />
           <NavButton icon={<History size={18} />} label="History/Logs" active={activeView === "history" || activeView === "historyDetail"} disabled={!companies.length} onClick={() => setActiveView("history")} />
         </nav>
-        <button className="primary-button sidebar-action" onClick={() => setActiveView("upload")} disabled={!companies.length}>
-          <Upload size={18} /> Upload Excel
+        <button className="primary-button sidebar-action" onClick={() => setActiveView("createVoucher")} disabled={!companies.length}>
+          <Plus size={18} /> Create Voucher
         </button>
       </aside>
       <section className="main-panel">
@@ -438,6 +440,11 @@ export function DashboardView({
       <section className="quick-actions">
         <h3>Quick Actions</h3>
         <div className="action-grid">
+          <button className="action-card" onClick={() => setActiveView("createVoucher")}>
+            <Plus size={22} />
+            <strong>Create Voucher</strong>
+            <span>Create one sales voucher without preparing an Excel file.</span>
+          </button>
           <button className="action-card" onClick={() => setActiveView("upload")}>
             <Upload size={22} />
             <strong>Upload Excel</strong>
@@ -607,6 +614,290 @@ export function InventoryView({
           {stockGroups?.last_sync_at && <span>Last synced: {formatDateTime(stockGroups.last_sync_at)}</span>}
         </div>
       </section>
+    </div>
+  );
+}
+
+const DEFAULT_SINGLE_VOUCHER_DRAFT: SingleVoucherDraft = {
+  voucher_type: "walk_in",
+  product_name: "",
+  quantity: 1,
+  price: 0,
+  payment_mode: "Cash",
+  voucher_date: new Date().toISOString().slice(0, 10),
+  buyer_name: "",
+  buyer_gstin: "",
+  buyer_state: "",
+  buyer_address: "",
+  place_of_supply: "",
+};
+
+export function CreateVoucherView({
+  activeCompany,
+  api,
+  tallyStatus,
+  stockGroups,
+  busy,
+  error,
+  preview,
+  commitRun,
+  previewVoucher,
+  createVoucher,
+}: {
+  activeCompany: Company;
+  api: (path: string, init?: RequestInit) => Promise<any>;
+  tallyStatus: TallyStatus | null;
+  stockGroups: StockGroupsResponse | null;
+  busy: boolean;
+  error: string;
+  preview: SingleVoucherPreview | null;
+  commitRun: CommitRun | null;
+  previewVoucher: (draft: SingleVoucherDraft) => Promise<SingleVoucherPreview | null>;
+  createVoucher: (draft: SingleVoucherDraft) => void;
+}) {
+  const [draft, setDraft] = useState<SingleVoucherDraft>(DEFAULT_SINGLE_VOUCHER_DRAFT);
+  const [stockItems, setStockItems] = useState<StockItem[]>([]);
+  const [loadingProducts, setLoadingProducts] = useState(false);
+  const [productError, setProductError] = useState("");
+  const [lastPreviewKey, setLastPreviewKey] = useState("");
+  const connected = tallyIsConnected(tallyStatus);
+  const stockSyncReady = Boolean(stockGroups?.stock_item_sync_ready);
+  const isGstFirm = draft.voucher_type === "gst_firm";
+  const draftKey = JSON.stringify(draft);
+  const previewReady = Boolean(preview?.valid && lastPreviewKey === draftKey);
+  const canPreview = Boolean(draft.product_name.trim() && draft.quantity > 0 && draft.price > 0 && draft.voucher_date && connected && stockSyncReady && (isGstFirm ? draft.buyer_name.trim() && draft.buyer_gstin.trim() && draft.buyer_state.trim() : draft.payment_mode.trim()));
+
+  useEffect(() => {
+    let active = true;
+    setLoadingProducts(true);
+    setProductError("");
+    api(`/companies/${activeCompany.id}/stock-items`)
+      .then((data) => {
+        if (active) setStockItems(data.items || []);
+      })
+      .catch((loadError) => {
+        if (active) setProductError(loadError instanceof Error ? loadError.message : "Unable to load products");
+      })
+      .finally(() => {
+        if (active) setLoadingProducts(false);
+      });
+    return () => {
+      active = false;
+    };
+  }, [activeCompany.id]);
+
+  function updateDraft(partial: Partial<SingleVoucherDraft>) {
+    setDraft((current) => ({ ...current, ...partial }));
+  }
+
+  async function handlePreview() {
+    const result = await previewVoucher(draft);
+    if (result) setLastPreviewKey(JSON.stringify(draft));
+  }
+
+  return (
+    <div className="stack">
+      <div className="page-intro">
+        <p className="eyebrow">Create Voucher</p>
+        <h1>Create a single sales voucher</h1>
+        <p>Use this when you need one voucher quickly. Use Excel upload when you have many rows.</p>
+      </div>
+      {error && <p className="alert error-alert">{error}</p>}
+      {productError && <p className="alert error-alert">{productError}</p>}
+      <section className="create-voucher-layout">
+        <div className="create-voucher-main">
+          <section className="card">
+            <h3>Who are you selling to?</h3>
+            <div className="upload-type-grid">
+              <button className={draft.voucher_type === "walk_in" ? "upload-type-card active" : "upload-type-card"} onClick={() => updateDraft({ voucher_type: "walk_in", payment_mode: "Cash" })} disabled={busy}>
+                <CheckCircle2 size={22} />
+                <strong>Walk-in Customer</strong>
+                <span>Cash / UPI sales to individual customers.</span>
+              </button>
+              <button className={isGstFirm ? "upload-type-card active" : "upload-type-card"} onClick={() => updateDraft({ voucher_type: "gst_firm", payment_mode: "Credit" })} disabled={busy}>
+                <Building2 size={22} />
+                <strong>GST Firm</strong>
+                <span>Sales to registered businesses requiring GST invoices.</span>
+              </button>
+            </div>
+          </section>
+          <section className="card create-voucher-form">
+            <h3>{isGstFirm ? "Invoice details" : "Sale details"}</h3>
+            {isGstFirm && (
+              <div className="form-grid">
+                <label>
+                  <span>Customer/Firm</span>
+                  <input value={draft.buyer_name} onChange={(event) => updateDraft({ buyer_name: event.target.value })} placeholder="Customer business name" disabled={busy} />
+                </label>
+                <label>
+                  <span>GSTIN</span>
+                  <input value={draft.buyer_gstin} onChange={(event) => updateDraft({ buyer_gstin: event.target.value.toUpperCase() })} placeholder="29AAACH1004N1ZQ" disabled={busy} />
+                </label>
+                <label>
+                  <span>State</span>
+                  <select value={draft.buyer_state} onChange={(event) => updateDraft({ buyer_state: event.target.value, place_of_supply: event.target.value })} disabled={busy}>
+                    <option value="">Select state</option>
+                    {INDIAN_GST_STATES.map((state) => (
+                      <option key={state} value={state}>
+                        {state}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                <label>
+                  <span>Address</span>
+                  <input value={draft.buyer_address} onChange={(event) => updateDraft({ buyer_address: event.target.value })} placeholder="Optional" disabled={busy} />
+                </label>
+              </div>
+            )}
+            <div className="form-grid">
+              <label className="wide-field">
+                <span>Product</span>
+                <ProductSearchInput value={draft.product_name} items={stockItems} loading={loadingProducts} disabled={busy} onChange={(value) => updateDraft({ product_name: value })} />
+              </label>
+              <label>
+                <span>Quantity</span>
+                <input value={draft.quantity || ""} onChange={(event) => updateDraft({ quantity: Number(event.target.value) })} type="number" min="0.01" step="0.01" disabled={busy} />
+              </label>
+              <label>
+                <span>{isGstFirm ? "Selling Price" : "Total Selling Price"}</span>
+                <input value={draft.price || ""} onChange={(event) => updateDraft({ price: Number(event.target.value) })} type="number" min="0.01" step="0.01" disabled={busy} />
+              </label>
+              {!isGstFirm && (
+                <label>
+                  <span>Payment Mode</span>
+                  <select value={draft.payment_mode} onChange={(event) => updateDraft({ payment_mode: event.target.value })} disabled={busy}>
+                    <option>Cash</option>
+                    <option>UPI</option>
+                    <option>Card</option>
+                    <option>Bank Transfer</option>
+                    <option>Cheque</option>
+                    <option>Razorpay</option>
+                  </select>
+                </label>
+              )}
+              <label>
+                <span>Voucher Date</span>
+                <input value={draft.voucher_date} onChange={(event) => updateDraft({ voucher_date: event.target.value })} type="date" disabled={busy} />
+              </label>
+            </div>
+          </section>
+        </div>
+        <aside className="side-stack">
+          <section className="card">
+            <h3>Tally Status</h3>
+            <TallyConnection status={tallyStatus} />
+            {!connected && <p className="alert warning-alert">Open Tally and refresh the connection before creating a voucher.</p>}
+            {connected && !stockSyncReady && <p className="alert warning-alert">Stock items are still syncing by group. Create Voucher will unlock when the background sync finishes.</p>}
+          </section>
+          <section className="card">
+            <h3>Preview</h3>
+            {!preview && <p className="muted">Preview the voucher before creating it in Tally.</p>}
+            {preview?.row && (
+              <div className="voucher-preview-list">
+                <p>
+                  <span>Product</span>
+                  <strong>{preview.row.product_name}</strong>
+                </p>
+                <p>
+                  <span>Quantity</span>
+                  <strong>{formatNumber(Number(preview.row.quantity || draft.quantity))}</strong>
+                </p>
+                <p>
+                  <span>{isGstFirm ? "Total" : "Price"}</span>
+                  <strong>{formatCurrency(Number(preview.row.total_amount || preview.row.price))}</strong>
+                </p>
+                {preview.row.gst_rate !== null && preview.row.gst_rate !== undefined && (
+                  <p>
+                    <span>GST</span>
+                    <strong>{preview.row.gst_rate}%</strong>
+                  </p>
+                )}
+                <Badge tone={preview.valid ? "success" : "error"}>{preview.valid ? "Ready" : "Needs attention"}</Badge>
+                {preview.row.validation_error && <p className="alert error-alert">{formatRowError(preview.row.validation_error)}</p>}
+              </div>
+            )}
+            {commitRun && (
+              <p className="muted">
+                {commitRun.status === "queued" ? "Queued" : commitRun.status === "processing" ? "Creating voucher" : "Finalizing"}: {commitRun.success_count} succeeded, {commitRun.failed_count} failed
+              </p>
+            )}
+            <div className="button-row">
+              <button className="ghost-button" onClick={handlePreview} disabled={busy || !canPreview}>
+                Preview Voucher
+              </button>
+              <button className="primary-button" onClick={() => createVoucher(draft)} disabled={busy || !previewReady}>
+                {busy ? "Creating..." : "Create Voucher"}
+              </button>
+            </div>
+          </section>
+        </aside>
+      </section>
+    </div>
+  );
+}
+
+function ProductSearchInput({
+  value,
+  items,
+  loading,
+  disabled,
+  onChange,
+}: {
+  value: string;
+  items: StockItem[];
+  loading: boolean;
+  disabled: boolean;
+  onChange: (value: string) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const normalizedQuery = value.trim().toLowerCase();
+  const matches = useMemo(() => {
+    if (!normalizedQuery) return items.slice(0, 20);
+    return items
+      .filter((item) =>
+        [item.name, item.display_name, item.part_number]
+          .filter(Boolean)
+          .some((field) => String(field).toLowerCase().includes(normalizedQuery)),
+      )
+      .slice(0, 20);
+  }, [items, normalizedQuery]);
+
+  return (
+    <div className="product-combobox">
+      <div className="product-search-control">
+        <Search size={18} />
+        <input
+          value={value}
+          onChange={(event) => {
+            onChange(event.target.value);
+            setOpen(true);
+          }}
+          onFocus={() => setOpen(true)}
+          placeholder={loading ? "Loading products..." : "Search product name"}
+          disabled={disabled || loading}
+        />
+      </div>
+      {open && !disabled && !loading && (
+        <div className="product-results">
+          {matches.map((item) => (
+            <button
+              key={item.id}
+              type="button"
+              className="product-result"
+              onMouseDown={(event) => event.preventDefault()}
+              onClick={() => {
+                onChange(item.name);
+                setOpen(false);
+              }}
+            >
+              <strong>{item.display_name || item.name}</strong>
+              {item.display_name && item.display_name !== item.name ? <span>{item.name}</span> : item.group_name ? <span>{item.group_name}</span> : null}
+            </button>
+          ))}
+          {!matches.length && <p className="muted product-empty">No matching synced products.</p>}
+        </div>
+      )}
     </div>
   );
 }
@@ -789,25 +1080,26 @@ export function CommitResultView({
 }) {
   const resultRows = summary.rows;
   const previewSummary = summarizePreview(resultRows);
+  const singleVoucher = isSingleVoucherImport(preview.import);
   return (
     <div className="stack">
       <div className="page-intro with-actions">
         <div>
           <p className="eyebrow">Commit result</p>
-          <h1>Excel commit summary</h1>
-          <p>{preview.import.filename || "Uploaded Excel"} has finished processing against Tally.</p>
+          <h1>{singleVoucher ? "Voucher summary" : "Excel commit summary"}</h1>
+          <p>{activityName(preview.import)} has finished processing against Tally.</p>
         </div>
         <div className="result-actions">
           <button className="ghost-button" onClick={() => setActiveView("history")}>
             View History
           </button>
-          <button className="primary-button" onClick={() => setActiveView("upload")}>
-            Upload Another Excel
+          <button className="primary-button" onClick={() => setActiveView(singleVoucher ? "createVoucher" : "upload")}>
+            {singleVoucher ? "Create Another Voucher" : "Upload Another Excel"}
           </button>
         </div>
       </div>
       <div className="stats-grid">
-        <MetricCard label="Rows in File" value={formatNumber(previewSummary.totalRows)} />
+        <MetricCard label={singleVoucher ? "Voucher Rows" : "Rows in File"} value={formatNumber(previewSummary.totalRows)} />
         <MetricCard label="Created in Tally" value={formatNumber(summary.success_count)} tone="success" />
         <MetricCard label="Failed During Commit" value={formatNumber(summary.failed_count)} tone={summary.failed_count ? "error" : "success"} />
       </div>
@@ -835,7 +1127,7 @@ export function HistoryView({
     <div className="stack">
       <div className="page-intro">
         <h1>History/Logs</h1>
-        <p>Review uploaded batches and committed vouchers without technical connector logs.</p>
+        <p>Review voucher activity without technical connector logs.</p>
       </div>
       {error && <p className="alert error-alert">{error}</p>}
       <section className="card">
@@ -848,7 +1140,7 @@ export function HistoryView({
             <thead>
               <tr>
                 <th>Date/Time</th>
-                <th>File Name</th>
+                <th>Source</th>
                 <th>Type</th>
                 <th>Rows</th>
                 <th>Success</th>
@@ -865,7 +1157,7 @@ export function HistoryView({
                 return (
                   <tr key={item.id}>
                     <td>{formatDateTime(item.completed_at || item.created_at)}</td>
-                    <td>{item.filename || "Uploaded Excel"}</td>
+                    <td>{activityName(item)}</td>
                     <td>{importTypeLabel(item.import_type)}</td>
                     <td>{item.row_count}</td>
                     <td>{stats.successCount}</td>
@@ -912,9 +1204,9 @@ export function HistoryDetailView({
       <div className="page-intro with-actions">
         <div>
           <p className="eyebrow">Upload log</p>
-          <h1>{detail.import.filename || "Uploaded Excel"}</h1>
+          <h1>{activityName(detail.import)}</h1>
           <p>
-            {importTypeLabel(detail.import.import_type)} uploaded on {formatDateTime(detail.import.created_at)}.
+            {importTypeLabel(detail.import.import_type)} created on {formatDateTime(detail.import.created_at)}.
           </p>
         </div>
         <button className="ghost-button back-button" onClick={() => setActiveView("history")}>
@@ -923,7 +1215,7 @@ export function HistoryDetailView({
       </div>
       {error && <p className="alert error-alert">{error}</p>}
       <div className="stats-grid">
-        <MetricCard label="Rows in File" value={formatNumber(detail.import.row_count)} />
+        <MetricCard label={isSingleVoucherImport(detail.import) ? "Voucher Rows" : "Rows in File"} value={formatNumber(detail.import.row_count)} />
         <MetricCard label="Valid Rows" value={formatNumber(previewSummary.validRows)} tone="success" />
         <MetricCard label="Invalid Rows" value={formatNumber(previewSummary.errorRows)} tone={previewSummary.errorRows ? "error" : "success"} />
         <MetricCard label="Committed" value={formatNumber(stats.successCount)} tone={stats.successCount ? "success" : undefined} />
@@ -932,7 +1224,7 @@ export function HistoryDetailView({
       </div>
       <section className="card">
         <div className="card-heading">
-          <h3>Upload Event</h3>
+          <h3>Activity Event</h3>
           <Badge tone={status.tone}>{status.label}</Badge>
         </div>
         <div className="detail-grid">
@@ -945,7 +1237,7 @@ export function HistoryDetailView({
             <strong>{formatDateTime(detail.import.completed_at)}</strong>
           </p>
           <p>
-            <span>Upload Type</span>
+            <span>Activity Type</span>
             <strong>{importTypeLabel(detail.import.import_type)}</strong>
           </p>
           <p>
@@ -975,7 +1267,7 @@ function RecentActivity({ imports, importDetails, setActiveView }: { imports: Im
         <table>
           <thead>
             <tr>
-              <th>File</th>
+              <th>Source</th>
               <th>Type</th>
               <th>Timestamp</th>
               <th>Rows</th>
@@ -987,7 +1279,7 @@ function RecentActivity({ imports, importDetails, setActiveView }: { imports: Im
               const status = deriveImportStatus(item, importDetails[item.id] || []);
               return (
                 <tr key={item.id}>
-                  <td>{item.filename || "Uploaded Excel"}</td>
+                  <td>{activityName(item)}</td>
                   <td>{importTypeLabel(item.import_type)}</td>
                   <td>{formatDateTime(item.created_at)}</td>
                   <td>{item.row_count}</td>
@@ -1280,10 +1572,20 @@ function Badge({ children, tone }: { children: React.ReactNode; tone: "success" 
 function viewTitle(view: AppView) {
   if (view === "upload") return "Upload Page";
   if (view === "inventory") return "Inventory Management";
+  if (view === "createVoucher") return "Create Voucher";
   if (view === "preview") return "Preview Page";
   if (view === "result") return "Commit Result";
   if (view === "history" || view === "historyDetail") return "History/Logs";
   return "Dashboard";
+}
+
+function isSingleVoucherImport(importRecord: ImportRecord) {
+  return String(importRecord.filename || "").startsWith("Single Voucher");
+}
+
+function activityName(importRecord: ImportRecord) {
+  if (isSingleVoucherImport(importRecord)) return importRecord.filename || "Single Voucher";
+  return importRecord.filename || "Uploaded Excel";
 }
 
 function formatFileSize(size: number) {
