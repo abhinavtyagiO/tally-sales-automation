@@ -691,8 +691,27 @@ export function CreateVoucherView({
   }
 
   async function handlePreview() {
-    const result = await previewVoucher(draft);
-    if (result) setLastPreviewKey(JSON.stringify(draft));
+    const resolved = resolveSingleVoucherDraftProduct(draft, stockItems);
+    if (resolved.error) {
+      setProductError(resolved.error);
+      return;
+    }
+    setProductError("");
+    setDraft(resolved.draft);
+    const resolvedKey = JSON.stringify(resolved.draft);
+    const result = await previewVoucher(resolved.draft);
+    if (result) setLastPreviewKey(resolvedKey);
+  }
+
+  function handleCreate() {
+    const resolved = resolveSingleVoucherDraftProduct(draft, stockItems);
+    if (resolved.error) {
+      setProductError(resolved.error);
+      return;
+    }
+    setProductError("");
+    setDraft(resolved.draft);
+    createVoucher(resolved.draft);
   }
 
   return (
@@ -826,7 +845,7 @@ export function CreateVoucherView({
               <button className="ghost-button" onClick={handlePreview} disabled={busy || !canPreview}>
                 Preview Voucher
               </button>
-              <button className="primary-button" onClick={() => createVoucher(draft)} disabled={busy || !previewReady}>
+              <button className="primary-button" onClick={handleCreate} disabled={busy || !previewReady}>
                 {busy ? "Creating..." : "Create Voucher"}
               </button>
             </div>
@@ -835,6 +854,41 @@ export function CreateVoucherView({
       </section>
     </div>
   );
+}
+
+function resolveSingleVoucherDraftProduct(draft: SingleVoucherDraft, items: StockItem[]) {
+  const productValue = draft.product_name.trim();
+  if (!productValue || !items.length) return { draft, error: "" };
+  const normalizedProduct = normalizeProductSearchValue(productValue);
+  const exactMatches = items.filter((item) =>
+    productSearchValues(item).some((value) => normalizeProductSearchValue(value) === normalizedProduct),
+  );
+  if (exactMatches.length === 1) return { draft: { ...draft, product_name: exactMatches[0].name }, error: "" };
+  if (exactMatches.length > 1) {
+    return {
+      draft,
+      error: "Multiple synced products match this value. Select the exact product from the dropdown.",
+    };
+  }
+  const partialMatches = items.filter((item) =>
+    productSearchValues(item).some((value) => normalizeProductSearchValue(value).includes(normalizedProduct)),
+  );
+  if (partialMatches.length === 1) return { draft: { ...draft, product_name: partialMatches[0].name }, error: "" };
+  if (partialMatches.length > 1) {
+    return {
+      draft,
+      error: "Multiple synced products match this search. Select the exact product from the dropdown.",
+    };
+  }
+  return { draft, error: "" };
+}
+
+function productSearchValues(item: StockItem) {
+  return [item.name, item.display_name, item.part_number, item.display_name && `${item.display_name} (${item.name})`].filter(Boolean).map(String);
+}
+
+function normalizeProductSearchValue(value: string) {
+  return value.toLowerCase().replace(/\s+/g, " ").trim();
 }
 
 function ProductSearchInput({
@@ -851,14 +905,12 @@ function ProductSearchInput({
   onChange: (value: string) => void;
 }) {
   const [open, setOpen] = useState(false);
-  const normalizedQuery = value.trim().toLowerCase();
+  const normalizedQuery = normalizeProductSearchValue(value);
   const matches = useMemo(() => {
     if (!normalizedQuery) return items.slice(0, 20);
     return items
       .filter((item) =>
-        [item.name, item.display_name, item.part_number]
-          .filter(Boolean)
-          .some((field) => String(field).toLowerCase().includes(normalizedQuery)),
+        productSearchValues(item).some((field) => normalizeProductSearchValue(field).includes(normalizedQuery)),
       )
       .slice(0, 20);
   }, [items, normalizedQuery]);
