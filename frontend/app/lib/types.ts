@@ -1,6 +1,7 @@
 export type User = { email: string; name?: string };
 
 export type ImportType = "retail_sales" | "gst_tax_invoice";
+export type CreateVoucherKind = "walk_in" | "gst_firm";
 
 export type Company = {
   id: number;
@@ -80,6 +81,27 @@ export type ImportRow = {
 };
 
 export type ImportPreview = { import: ImportRecord; rows: ImportRow[] };
+
+export type SingleVoucherDraft = {
+  voucher_type: CreateVoucherKind;
+  product_name: string;
+  quantity: number;
+  price: number;
+  payment_mode: string;
+  voucher_date: string;
+  buyer_name: string;
+  buyer_gstin: string;
+  buyer_state: string;
+  buyer_address: string;
+  place_of_supply: string;
+};
+
+export type SingleVoucherPreview = {
+  valid: boolean;
+  voucher?: Record<string, unknown> | null;
+  row: ImportRow;
+  rows: ImportRow[];
+};
 
 export type StockItem = {
   id: number;
@@ -187,4 +209,4 @@ export type CommitRun = {
   result?: CommitSummary | Record<string, never>;
 };
 
-export type AppView = "dashboard" | "inventory" | "upload" | "preview" | "result" | "history" | "historyDetail";
+export type AppView = "dashboard" | "inventory" | "createVoucher" | "upload" | "preview" | "result" | "history" | "historyDetail";

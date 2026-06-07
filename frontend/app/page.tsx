@@ -2,10 +2,10 @@
 
 import { useEffect, useMemo, useRef, useState } from "react";
 
-import { AppShell, CommitResultView, DashboardView, HistoryDetailView, HistoryView, InventoryView, LoginPanel, PreviewCommitView, UploadView } from "./components";
+import { AppShell, CommitResultView, CreateVoucherView, DashboardView, HistoryDetailView, HistoryView, InventoryView, LoginPanel, PreviewCommitView, UploadView } from "./components";
 import { formatUserError, tallyIsConnected } from "./lib/derivations";
 import { deriveOnboardingState, isCompanySetupComplete, type OnboardingLocalState, type OnboardingStepId } from "./lib/onboarding";
-import type { AppView, CommitRun, CommitSummary, Company, HelperStatus, ImportPreview, ImportRecord, ImportRow, ImportType, MasterSyncStatus, StockGroupsResponse, TallyCompanies, TallyStatus, User } from "./lib/types";
+import type { AppView, CommitRun, CommitSummary, Company, HelperStatus, ImportPreview, ImportRecord, ImportRow, ImportType, MasterSyncStatus, SingleVoucherDraft, SingleVoucherPreview, StockGroupsResponse, TallyCompanies, TallyStatus, User } from "./lib/types";
 import { OnboardingFlow } from "./onboarding";
 
 const CONFIGURED_API_URL = process.env.NEXT_PUBLIC_API_URL || "";
@@ -61,6 +61,7 @@ export default function Home() {
   const [importType, setImportType] = useState<ImportType>("retail_sales");
   const [devEmail, setDevEmail] = useState("");
   const [preview, setPreview] = useState<ImportPreview | null>(null);
+  const [singleVoucherPreview, setSingleVoucherPreview] = useState<SingleVoucherPreview | null>(null);
   const [commitSummary, setCommitSummary] = useState<CommitSummary | null>(null);
   const [commitRun, setCommitRun] = useState<CommitRun | null>(null);
   const [historyDetail, setHistoryDetail] = useState<ImportPreview | null>(null);
@@ -285,6 +286,7 @@ export default function Home() {
       setImportDetails({});
       setStockGroups(null);
       setPreview(null);
+      setSingleVoucherPreview(null);
       setCommitSummary(null);
       setCommitRun(null);
       setHistoryDetail(null);
@@ -547,6 +549,7 @@ export default function Home() {
       setSupplierGstin("");
       setSupplierState("");
       setPreview(null);
+      setSingleVoucherPreview(null);
       setCommitSummary(null);
     } catch (companyError) {
       setError(companyError instanceof Error ? companyError.message : "Company was not added");
@@ -584,6 +587,7 @@ export default function Home() {
       const data = await api(`/companies/${companyId}/select`, { method: "POST" });
       setActiveCompanyId(data.company.id);
       setPreview(null);
+      setSingleVoucherPreview(null);
       setCommitSummary(null);
       setHistoryDetail(null);
       setSelectedFile(null);
@@ -619,6 +623,66 @@ export default function Home() {
       setError(uploadError instanceof Error ? uploadError.message : "Excel upload failed");
     } finally {
       setBusy(false);
+    }
+  }
+
+  async function previewSingleVoucher(draft: SingleVoucherDraft) {
+    if (!activeCompany || busy) return null;
+    if (!tallyIsConnected(tallyStatus)) {
+      setError("Open Tally and refresh the connection before creating a voucher.");
+      return null;
+    }
+    if (!stockGroups?.stock_item_sync_ready) {
+      setError("Stock items are still syncing. Create Voucher will unlock when the background sync finishes.");
+      return null;
+    }
+    setBusy(true);
+    setError("");
+    setCommitSummary(null);
+    try {
+      const data = await api(`/companies/${activeCompany.id}/single-vouchers/preview`, { method: "POST", body: JSON.stringify(draft) });
+      setSingleVoucherPreview(data);
+      return data as SingleVoucherPreview;
+    } catch (previewError) {
+      setSingleVoucherPreview(null);
+      setError(previewError instanceof Error ? previewError.message : "Voucher preview failed");
+      return null;
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function createSingleVoucher(draft: SingleVoucherDraft) {
+    if (!activeCompany || busy) return;
+    if (!tallyIsConnected(tallyStatus)) {
+      setError("Open Tally and refresh the connection before creating a voucher.");
+      return;
+    }
+    if (!stockGroups?.stock_item_sync_ready) {
+      setError("Stock items are still syncing. Create Voucher will unlock when the background sync finishes.");
+      return;
+    }
+    setBusy(true);
+    setError("");
+    try {
+      const data = await api(`/companies/${activeCompany.id}/single-vouchers`, { method: "POST", body: JSON.stringify(draft) });
+      const nextPreview = { import: data.import, rows: data.rows };
+      setPreview(nextPreview);
+      setImportDetails((current) => ({ ...current, [data.import.id]: data.rows }));
+      const completed = await waitForCommitRun(activeCompany.id, data.import.id, data.commit_run);
+      const summary = completed.result as CommitSummary | undefined;
+      if (completed.status === "failed" || !summary?.rows) throw new Error(completed.error_message || "Voucher creation failed");
+      setCommitSummary(summary);
+      setPreview({ import: data.import, rows: summary.rows });
+      setImportDetails((current) => ({ ...current, [data.import.id]: summary.rows }));
+      setSingleVoucherPreview(null);
+      await loadImports(activeCompany.id);
+      setActiveView("result");
+    } catch (createError) {
+      setError(createError instanceof Error ? createError.message : "Voucher creation failed");
+    } finally {
+      setBusy(false);
+      setCommitRun(null);
     }
   }
 
@@ -807,6 +871,20 @@ export default function Home() {
         />
       )}
       {activeView === "inventory" && <InventoryView stockGroups={stockGroups} activeCompany={activeCompany} api={api} busy={busy} syncInventory={syncInventory} refreshInventory={() => loadStockGroups(activeCompany.id)} error={error} />}
+      {activeView === "createVoucher" && (
+        <CreateVoucherView
+          activeCompany={activeCompany}
+          api={api}
+          tallyStatus={tallyStatus}
+          stockGroups={stockGroups}
+          busy={busy}
+          error={error}
+          preview={singleVoucherPreview}
+          commitRun={commitRun}
+          previewVoucher={previewSingleVoucher}
+          createVoucher={createSingleVoucher}
+        />
+      )}
       {activeView === "upload" && (
         <UploadView
           selectedFile={selectedFile}
