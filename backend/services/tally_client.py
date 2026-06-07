@@ -304,6 +304,8 @@ def _stock_item_display_name(item: dict[str, Any], part_number: str | None) -> s
     return (
         _stock_item_mailing_name(item)
         or _text_value(_get_ci(item, "DisplayName") or _get_ci(item, "DISPLAYNAME"))
+        or _text_value(_get_ci(item, "Description") or _get_ci(item, "APDescription"))
+        or _text_value(_get_ci(item, "BasicUserDescription") or _get_ci(item, "APBasicUserDescription"))
         or part_number
         or _text_value(_get_ci(item, "Alias") or _get_ci(item, "OnlyAlias") or _get_ci(item, "APOnlyAlias"))
     )
@@ -551,8 +553,8 @@ def _sales_voucher_xml(voucher: dict[str, Any], company_name: str | None = None)
             <PERSISTEDVIEW>Invoice Voucher View</PERSISTEDVIEW>
             <ISINVOICE>Yes</ISINVOICE>
             {inventory_entries}
-            {tax_ledger_entries}
             {party_entry}
+            {tax_ledger_entries}
           </VOUCHER>
         </TALLYMESSAGE>
     </DATA>
@@ -606,9 +608,21 @@ def _stock_items_collection_xml(company_name: str | None = None, group_name: str
             "Category",
             "StockCategory",
             "MailingName",
+            "MailingName.*",
+            "MAILINGNAME.LIST",
+            "MAILINGNAME.LIST.*",
             "PartNo",
+            "APName",
+            "APParent",
+            "APDescription",
+            "APBasicUserDescription",
+            "APPartNo",
+            "APOnlyAlias",
             "Alias",
             "OnlyAlias",
+            "LanguageName.*",
+            "LANGUAGENAME.LIST",
+            "LANGUAGENAME.LIST.*",
             "BaseUnits",
             "AdditionalUnits",
             "OpeningBalance",
@@ -830,7 +844,9 @@ def _gst_inventory_entry_xml(item: dict[str, Any]) -> str:
     quantity = _xml_quantity_with_unit(item.get("Quantity", 1), unit)
     sales_ledger = _xml_text(item.get("SalesLedgerName") or "GST Sales")
     gst_rate = float(item.get("GSTRate") or 0)
-    half_rate = gst_rate / 2
+    cgst_rate = float(item.get("CGSTRate") if item.get("CGSTRate") is not None else gst_rate / 2)
+    sgst_rate = float(item.get("SGSTRate") if item.get("SGSTRate") is not None else gst_rate / 2)
+    igst_rate = float(item.get("IGSTRate") if item.get("IGSTRate") is not None else 0)
     return f"""<ALLINVENTORYENTRIES.LIST>
             <STOCKITEMNAME>{stock_item}</STOCKITEMNAME>
             <GSTOVRDNISREVCHARGEAPPL>Not Applicable</GSTOVRDNISREVCHARGEAPPL>
@@ -861,9 +877,9 @@ def _gst_inventory_entry_xml(item: dict[str, Any]) -> str:
               <ISPARTYLEDGER>No</ISPARTYLEDGER>
               <AMOUNT>{amount}</AMOUNT>
             </ACCOUNTINGALLOCATIONS.LIST>
-            {_gst_rate_detail_xml("CGST", half_rate)}
-            {_gst_rate_detail_xml("SGST/UTGST", half_rate)}
-            {_gst_rate_detail_xml("IGST", gst_rate)}
+            {_gst_rate_detail_xml("CGST", cgst_rate)}
+            {_gst_rate_detail_xml("SGST/UTGST", sgst_rate)}
+            {_gst_rate_detail_xml("IGST", igst_rate)}
             {_gst_rate_detail_xml("Cess", None)}
             {_gst_rate_detail_xml("State Cess", 0)}
           </ALLINVENTORYENTRIES.LIST>"""

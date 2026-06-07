@@ -138,6 +138,9 @@ def build_gst_invoice(row: dict[str, Any], company: dict[str, Any], index: int =
                 "GSTType": stock.get("gst_type") or "Goods",
                 "Taxability": stock.get("taxability") or "Taxable",
                 "GSTRate": gst_rate,
+                "CGSTRate": tax["cgst_rate"],
+                "SGSTRate": tax["sgst_rate"],
+                "IGSTRate": tax["igst_rate"],
                 "SalesLedgerName": str(company.get("gst_sales_ledger_name") or config.GST_SALES_LEDGER_NAME),
             }
         ],
