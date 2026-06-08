@@ -239,6 +239,7 @@ jobs:
           gh release create "$TAG_NAME" \
             helper-artifacts/AccountPilotHelper.exe \
             helper-artifacts/AccountPilotHelperSetup.exe \
+            --repo "${{ github.repository }}" \
             --target "${{ github.sha }}" \
             --title "AccountPilot Helper $TAG_NAME" \
             --notes "Automated AccountPilot Helper release for ${{ github.sha }}." \
