@@ -144,6 +144,9 @@ export function formatRowError(message?: string | null) {
   if (lower.includes("voucher date is missing") || lower.includes("educational mode")) {
     return "Tally rejected the voucher date. If Tally is in educational mode, use the 1st, 2nd, or 31st of a month.";
   }
+  if (lower.includes("gst rate") && (lower.includes("missing") || lower.includes("not configured"))) {
+    return "GST rate is missing for this product. Add the GST rate in Tally, sync inventory, and try again.";
+  }
   if (lower.includes("product not found") || lower.includes("stock item")) {
     return "Product not found in synced Tally stock items.";
   }

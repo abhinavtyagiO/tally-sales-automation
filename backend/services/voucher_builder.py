@@ -249,6 +249,9 @@ def _build_sales_voucher(
                 "GSTType": stock_item.get("gst_type") or "Goods",
                 "Taxability": stock_item.get("taxability") or "Taxable",
                 "GSTRate": tax["gst_rate"],
+                "CGSTRate": tax["cgst_rate"],
+                "SGSTRate": tax["sgst_rate"],
+                "IGSTRate": tax["igst_rate"],
                 "SalesLedgerName": sales_ledger,
             }
         ],

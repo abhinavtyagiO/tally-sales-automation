@@ -113,6 +113,10 @@ test("formatRowError extracts short row-level Tally errors", () => {
     "Tally rejected the voucher date. If Tally is in educational mode, use the 1st, 2nd, or 31st of a month.",
   );
   assert.equal(formatRowError("Product not found in synced Tally stock items"), "Product not found in synced Tally stock items.");
+  assert.equal(
+    formatRowError("GST rate is missing for this stock item"),
+    "GST rate is missing for this product. Add the GST rate in Tally, sync inventory, and try again.",
+  );
 });
 
 test("deriveOnboardingState gates production progress by real setup facts", () => {
