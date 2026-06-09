@@ -310,10 +310,11 @@ def _apply_job_result(job: dict[str, Any]) -> None:
         payload = job.get("payload") or {}
         voucher = payload.get("voucher") or {}
         source = voucher.get("Source") or {}
-        import_row_id = source.get("import_row_id")
-        if import_row_id:
+        import_row_ids = _source_import_row_ids(source)
+        if import_row_ids:
             database.log_voucher(voucher, {"error": job.get("error_message")}, "failed", source=source)
-            database.update_import_row_commit(int(import_row_id), "failed", job.get("error_message") or "Connector job failed")
+            for import_row_id in import_row_ids:
+                database.update_import_row_commit(import_row_id, "failed", job.get("error_message") or "Connector job failed")
         if job.get("commit_run_id"):
             run = database.refresh_commit_run_from_rows(int(job["commit_run_id"]))
             _log_commit_run_progress(run, reason="voucher_failed")
@@ -364,11 +365,11 @@ def _apply_job_result(job: dict[str, Any]) -> None:
         voucher = payload.get("voucher") or {}
         source = voucher.get("Source") or {}
         fingerprint = source.get("source_fingerprint")
-        import_row_id = source.get("import_row_id")
+        import_row_ids = _source_import_row_ids(source)
         if fingerprint and not database.successful_fingerprint_exists(str(fingerprint), company_id=company_id):
             database.log_voucher(voucher, result, "success", source=source)
-        if import_row_id:
-            database.update_import_row_commit(int(import_row_id), "success", None, result)
+        for import_row_id in import_row_ids:
+            database.update_import_row_commit(import_row_id, "success", None, result)
         if job.get("commit_run_id"):
             run = database.refresh_commit_run_from_rows(int(job["commit_run_id"]))
             _log_commit_run_progress(run, reason="voucher_completed")
@@ -434,6 +435,13 @@ def _latest_user_job(user_id: int, operation: str) -> dict[str, Any] | None:
 def _job_import_row_id(job: dict[str, Any]) -> Any:
     source = (((job.get("payload") or {}).get("voucher") or {}).get("Source") or {})
     return source.get("import_row_id")
+
+
+def _source_import_row_ids(source: dict[str, Any]) -> list[int]:
+    row_ids = source.get("import_row_ids") or []
+    if not row_ids and source.get("import_row_id"):
+        row_ids = [source.get("import_row_id")]
+    return [int(row_id) for row_id in row_ids if row_id]
 
 
 def _log_commit_run_progress(run: dict[str, Any] | None, reason: str) -> None:

@@ -937,6 +937,41 @@ class Parent2FlowTests(unittest.TestCase):
         self.assertEqual(result["voucher"]["InventoryEntries"][0]["StockItemName"], "2.75-18 NGP")
         self.assertEqual(result["voucher"]["PartyLedgerName"], "Card")
 
+    def test_single_walk_in_voucher_preview_supports_multiple_items(self) -> None:
+        company = self.make_company()
+        self.seed_company_masters(company)
+        database.replace_stock_items(
+            [
+                {"name": "Stock A", "gst_rate": 18, "base_unit": "nos", "taxability": "Taxable"},
+                {"name": "Stock B", "gst_rate": 18, "base_unit": "nos", "taxability": "Taxable"},
+            ],
+            company_id=company["id"],
+        )
+
+        result = routes.preview_single_voucher(
+            company["id"],
+            routes.CreateVoucherRequest(
+                voucher_type="walk_in",
+                items=[
+                    routes.CreateVoucherItemRequest(product_name="Stock A", quantity=2, price=200),
+                    routes.CreateVoucherItemRequest(product_name="Stock B", quantity=2, price=400),
+                ],
+                payment_mode="Cash",
+                voucher_date="2026-05-31",
+            ),
+            user=self.user,
+        )
+
+        self.assertTrue(result["valid"])
+        self.assertEqual(len(result["voucher"]["InventoryEntries"]), 2)
+        self.assertEqual(result["voucher"]["InvoiceTotal"], 600)
+        self.assertEqual(result["voucher"]["TaxableAmount"], 508.47)
+        self.assertEqual(result["voucher"]["GSTAmount"], 91.53)
+        self.assertEqual(result["voucher"]["InventoryEntries"][0]["StockItemName"], "Stock A")
+        self.assertEqual(result["voucher"]["InventoryEntries"][0]["Rate"], 84.75)
+        self.assertEqual(result["voucher"]["InventoryEntries"][1]["StockItemName"], "Stock B")
+        self.assertEqual(result["voucher"]["InventoryEntries"][1]["Rate"], 169.49)
+
     def test_single_gst_firm_voucher_preview_uses_existing_gst_builder(self) -> None:
         company = self.make_company()
         database.update_company(
@@ -970,6 +1005,47 @@ class Parent2FlowTests(unittest.TestCase):
         self.assertEqual(result["row"]["total_amount"], 1575)
         self.assertEqual(result["voucher"]["InventoryEntries"][0]["Rate"], 75)
         self.assertEqual(result["voucher"]["PartyLedgerName"], "Chanda Enterprises")
+
+    def test_single_gst_firm_voucher_preview_supports_multiple_inclusive_items(self) -> None:
+        company = self.make_company()
+        database.update_company(
+            company["id"],
+            self.user["id"],
+            {"supplier_gstin": "29AAECP4424C1ZN", "supplier_state": "Karnataka"},
+        )
+        company = database.get_company(company["id"], user_id=self.user["id"])
+        database.replace_stock_items(
+            [
+                {"name": "GST Stock A", "base_unit": "nos", "gst_rate": 18, "taxability": "Taxable"},
+                {"name": "GST Stock B", "base_unit": "nos", "gst_rate": 18, "taxability": "Taxable"},
+            ],
+            company_id=company["id"],
+        )
+
+        result = routes.preview_single_voucher(
+            company["id"],
+            routes.CreateVoucherRequest(
+                voucher_type="gst_firm",
+                items=[
+                    routes.CreateVoucherItemRequest(product_name="GST Stock A", quantity=2, price=200),
+                    routes.CreateVoucherItemRequest(product_name="GST Stock B", quantity=2, price=400),
+                ],
+                voucher_date="2026-05-31",
+                buyer_name="Chanda Enterprises",
+                buyer_gstin="29AAACH1004N1ZQ",
+                buyer_state="Karnataka",
+            ),
+            user=self.user,
+        )
+
+        self.assertTrue(result["valid"])
+        self.assertEqual(len(result["voucher"]["InventoryEntries"]), 2)
+        self.assertEqual(result["row"]["total_amount"], 600)
+        self.assertEqual(result["row"]["taxable_amount"], 508.47)
+        self.assertEqual(result["row"]["cgst_amount"], 45.77)
+        self.assertEqual(result["row"]["sgst_amount"], 45.76)
+        self.assertEqual(result["voucher"]["InventoryEntries"][0]["Rate"], 84.75)
+        self.assertEqual(result["voucher"]["InventoryEntries"][1]["Rate"], 169.49)
 
     def test_single_gst_firm_voucher_price_is_inclusive_line_total(self) -> None:
         company = self.make_company()
@@ -1082,6 +1158,60 @@ class Parent2FlowTests(unittest.TestCase):
         self.assertEqual([job["operation"] for job in jobs], ["create_ledger", "create_sales_voucher"])
         self.assertEqual(jobs[0]["payload"]["name"], "Card")
         self.assertEqual(jobs[1]["payload"]["voucher"]["Source"]["import_row_id"], result["rows"][0]["id"])
+
+    def test_grouped_upload_rows_enqueue_one_multi_item_voucher_job(self) -> None:
+        original_mode = config.CONNECTOR_MODE
+        config.CONNECTOR_MODE = "polling"
+        self.addCleanup(lambda: setattr(config, "CONNECTOR_MODE", original_mode))
+        company = self.make_company()
+        agent = self.make_token_agent()
+        database.update_company(company["id"], self.user["id"], {"local_agent_id": agent["id"]})
+        company = database.get_company(company["id"], user_id=self.user["id"])
+        self.seed_company_masters(company, include_upi=False)
+        database.replace_stock_items(
+            [
+                {"name": "Stock A", "gst_rate": 18, "base_unit": "nos", "taxability": "Taxable"},
+                {"name": "Stock B", "gst_rate": 18, "base_unit": "nos", "taxability": "Taxable"},
+            ],
+            company_id=company["id"],
+        )
+        import_record = database.create_import(
+            self.user["id"],
+            company["id"],
+            "multi-item.xlsx",
+            [
+                {
+                    "voucher_id": "INV-1",
+                    "source_row_id": "2",
+                    "product_name": "Stock A",
+                    "quantity": 2,
+                    "price": 200,
+                    "payment_mode": "Cash",
+                    "voucher_date": "2026-05-31",
+                },
+                {
+                    "voucher_id": "INV-1",
+                    "source_row_id": "3",
+                    "product_name": "Stock B",
+                    "quantity": 2,
+                    "price": 400,
+                    "payment_mode": "Cash",
+                    "voucher_date": "2026-05-31",
+                },
+            ],
+        )
+
+        processed = routes.process_import(company["id"], import_record["id"], user=self.user)
+        started = routes.start_commit_run(company["id"], import_record["id"], routes.CommitRequest(), background_tasks=None, user=self.user)
+
+        self.assertEqual(processed["import"]["valid_count"], 2)
+        jobs = database.list_connector_jobs_for_commit_run(started["commit_run"]["id"])
+        voucher_jobs = [job for job in jobs if job["operation"] == "create_sales_voucher"]
+        self.assertEqual(len(voucher_jobs), 1)
+        voucher = voucher_jobs[0]["payload"]["voucher"]
+        self.assertEqual(len(voucher["InventoryEntries"]), 2)
+        self.assertEqual(voucher["InvoiceTotal"], 600)
+        self.assertEqual(voucher["Source"]["import_row_ids"], [processed["rows"][0]["id"], processed["rows"][1]["id"]])
 
     def test_gst_import_commit_creates_required_ledgers_and_dispatches_gst_voucher(self) -> None:
         company = self.make_company()

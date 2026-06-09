@@ -56,9 +56,11 @@ export type ImportRecord = {
 export type ImportRow = {
   id: number;
   source_row_id: string;
+  voucher_id?: string | null;
   product_name: string;
   price: number;
   quantity?: number | null;
+  items?: SingleVoucherItem[];
   rate?: number | null;
   payment_mode: string;
   voucher_date: string;
@@ -82,11 +84,18 @@ export type ImportRow = {
 
 export type ImportPreview = { import: ImportRecord; rows: ImportRow[] };
 
+export type SingleVoucherItem = {
+  product_name: string;
+  quantity: number;
+  price: number;
+};
+
 export type SingleVoucherDraft = {
   voucher_type: CreateVoucherKind;
   product_name: string;
   quantity: number;
   price: number;
+  items: SingleVoucherItem[];
   payment_mode: string;
   voucher_date: string;
   buyer_name: string;

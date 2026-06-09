@@ -101,6 +101,26 @@ class MvpFlowTests(unittest.TestCase):
 
         self.assertEqual(rows[0]["payment_mode"], "card")
 
+    def test_excel_parser_preserves_optional_voucher_id_and_quantity(self) -> None:
+        buffer = BytesIO()
+        pd.DataFrame(
+            [
+                {
+                    "voucher_id": "INV-1",
+                    "product_name": "2.75-18 NGP",
+                    "quantity": 2,
+                    "price": 200,
+                    "payment_mode": "Cash",
+                    "voucher_date": "2026-05-04",
+                }
+            ]
+        ).to_excel(buffer, index=False)
+
+        rows = parse_excel(buffer.getvalue())
+
+        self.assertEqual(rows[0]["voucher_id"], "INV-1")
+        self.assertEqual(rows[0]["quantity"], 2)
+
     def test_excel_parser_rejects_missing_voucher_date(self) -> None:
         buffer = BytesIO()
         pd.DataFrame([{"product_name": "2.75-18 NGP", "price": 1600, "payment_mode": "Cash"}]).to_excel(
