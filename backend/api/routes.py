@@ -167,11 +167,18 @@ class CommitRequest(BaseModel):
     import_row_ids: Optional[list[int]] = None
 
 
-class CreateVoucherRequest(BaseModel):
-    voucher_type: str
+class CreateVoucherItemRequest(BaseModel):
     product_name: str
     quantity: float = Field(gt=0)
     price: float = Field(gt=0)
+
+
+class CreateVoucherRequest(BaseModel):
+    voucher_type: str
+    product_name: Optional[str] = None
+    quantity: Optional[float] = Field(default=None, gt=0)
+    price: Optional[float] = Field(default=None, gt=0)
+    items: list[CreateVoucherItemRequest] = Field(default_factory=list)
     payment_mode: Optional[str] = None
     voucher_date: Optional[date] = None
     buyer_name: Optional[str] = None
@@ -633,7 +640,7 @@ def create_single_voucher(
         )
         raise HTTPException(status_code=400, detail=preview["row"].get("validation_error") or "Voucher details are invalid")
     filename = "Single Voucher - GST Firm" if import_type == IMPORT_TYPE_GST else "Single Voucher - Walk-in Customer"
-    import_record = database.create_import(user["id"], company_id, filename, [row], import_type=import_type)
+    import_record = database.create_import(user["id"], company_id, filename, _single_voucher_persist_rows(row), import_type=import_type)
     processed = _process_import_rows(company, int(import_record["id"]), user)
     valid_rows = [item for item in processed["rows"] if item["validation_status"] == "valid"]
     if not valid_rows:
@@ -786,16 +793,19 @@ def commit_import(
         and (not request.import_row_ids or row["id"] in request.import_row_ids)
     ]
     is_gst = normalize_import_type(import_record.get("import_type")) == IMPORT_TYPE_GST
+    price_is_inclusive_total = str(import_record.get("filename") or "") == "Single Voucher - GST Firm"
+    grouped_rows = _group_rows_for_vouchers(rows, IMPORT_TYPE_GST if is_gst else IMPORT_TYPE_RETAIL, price_is_inclusive_total=price_is_inclusive_total)
     if is_gst:
         _ensure_company_gst_commit_ledgers(company, agent, rows)
-        result = build_gst_invoices([_row_to_gst(row) for row in rows], company=company, user_id=user["id"])
+        result = build_gst_invoices(grouped_rows, company=company, user_id=user["id"])
     else:
         _ensure_company_commit_ledgers(company, agent, rows)
-        result = build_vouchers([_row_to_sale(row) for row in rows], ensure_ledgers=False, company=company, user_id=user["id"])
+        result = build_vouchers(grouped_rows, ensure_ledgers=False, company=company, user_id=user["id"])
     results: list[dict[str, Any]] = []
     logger.info("import.commit.start user_id=%s company_id=%s import_id=%s row_count=%s", user["id"], company_id, import_id, len(rows))
     for voucher in result.vouchers:
         import_row_id = voucher["Source"]["import_row_id"]
+        import_row_ids = [int(row_id) for row_id in (voucher["Source"].get("import_row_ids") or [import_row_id]) if row_id]
         try:
             if not is_gst:
                 validate_voucher(voucher)
@@ -805,18 +815,18 @@ def commit_import(
                 {"voucher": voucher, "company_name": company["company_name"], "tally_url": company["tally_url"]},
             )
             database.log_voucher(voucher, response, "success", source=voucher.get("Source"))
-            database.update_import_row_commit(import_row_id, "success", None, response)
+            _update_group_commit(import_row_ids, "success", None, response)
             results.append({"import_row_id": import_row_id, "status": "success", "response": response})
             logger.info("import.commit.row_success user_id=%s company_id=%s import_id=%s row_id=%s", user["id"], company_id, import_id, import_row_id)
         except (TallyError, VoucherBuildError, GstInvoiceError, ValueError) as exc:
             database.log_voucher(voucher, {"error": str(exc)}, "failed", source=voucher.get("Source"))
-            database.update_import_row_commit(import_row_id, "failed", str(exc))
+            _update_group_commit(import_row_ids, "failed", str(exc))
             results.append({"import_row_id": import_row_id, "status": "failed", "error": str(exc)})
             logger.warning("import.commit.row_failed user_id=%s company_id=%s import_id=%s row_id=%s error=%r", user["id"], company_id, import_id, import_row_id, exc)
     for error in result.errors:
-        row = rows[error["row"]]
-        database.update_import_row_commit(row["id"], "failed", error["error"])
-        results.append({"import_row_id": row["id"], "status": "failed", "error": error["error"]})
+        row = grouped_rows[error["row"]]
+        _update_group_commit([int(row_id) for row_id in row.get("import_row_ids", [])], "failed", error["error"])
+        results.append({"import_row_id": row.get("import_row_id"), "status": "failed", "error": error["error"]})
     if rows:
         database.mark_import_completed(import_id)
     logger.info(
@@ -1034,9 +1044,11 @@ def _row_to_sale(row: dict[str, Any]) -> dict[str, Any]:
         "quantity": row.get("quantity") or 1,
         "payment_mode": row["payment_mode"],
         "voucher_date": row["voucher_date"],
+        "voucher_id": row.get("voucher_id"),
         "source_row_id": row["source_row_id"],
         "import_id": row["import_id"],
         "import_row_id": row["id"],
+        "import_row_ids": [row["id"]],
     }
 
 
@@ -1053,9 +1065,11 @@ def _row_to_gst(row: dict[str, Any], price_is_inclusive_total: bool = False) -> 
         "buyer_state": row.get("buyer_state"),
         "buyer_address": row.get("buyer_address"),
         "place_of_supply": row.get("place_of_supply"),
+        "voucher_id": row.get("voucher_id"),
         "source_row_id": row["source_row_id"],
         "import_id": row["import_id"],
         "import_row_id": row["id"],
+        "import_row_ids": [row["id"]],
     }
     if price_is_inclusive_total:
         converted.pop("rate", None)
@@ -1063,11 +1077,82 @@ def _row_to_gst(row: dict[str, Any], price_is_inclusive_total: bool = False) -> 
     return converted
 
 
+def _single_voucher_persist_rows(row: dict[str, Any]) -> list[dict[str, Any]]:
+    items = row.get("items") or []
+    if not items:
+        return [row]
+    rows = []
+    for index, item in enumerate(items, start=1):
+        rows.append(
+            {
+                **row,
+                "source_row_id": f"single-{index}",
+                "product_name": item["product_name"],
+                "price": item["price"],
+                "quantity": item["quantity"],
+                "rate": item.get("rate"),
+                "items": None,
+            }
+        )
+    return rows
+
+
+def _voucher_group_key(row: dict[str, Any]) -> str:
+    return str(row.get("voucher_id") or row["id"])
+
+
+def _group_rows_for_vouchers(rows: list[dict[str, Any]], import_type: str, price_is_inclusive_total: bool = False) -> list[dict[str, Any]]:
+    grouped: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        key = _voucher_group_key(row)
+        if key not in grouped:
+            grouped[key] = _row_to_gst(row, price_is_inclusive_total=price_is_inclusive_total) if import_type == IMPORT_TYPE_GST else _row_to_sale(row)
+            grouped[key]["items"] = []
+            grouped[key]["import_row_ids"] = []
+            grouped[key]["source_row_ids"] = []
+        voucher = grouped[key]
+        _ensure_group_context_matches(voucher, row, import_type)
+        item = {
+            "product_name": row["product_name"],
+            "price": row["price"],
+            "quantity": row.get("quantity") or 1,
+        }
+        if import_type == IMPORT_TYPE_GST:
+            if row.get("rate") is not None and not price_is_inclusive_total:
+                item["rate"] = row.get("rate")
+            if price_is_inclusive_total:
+                item["price_is_inclusive_total"] = True
+        voucher["items"].append(item)
+        voucher["import_row_ids"].append(row["id"])
+        voucher["source_row_ids"].append(str(row.get("source_row_id") or row["id"]))
+        voucher["source_row_id"] = ",".join(voucher["source_row_ids"])
+    return list(grouped.values())
+
+
+def _ensure_group_context_matches(voucher: dict[str, Any], row: dict[str, Any], import_type: str) -> None:
+    fields = ["payment_mode", "voucher_date"]
+    if import_type == IMPORT_TYPE_GST:
+        fields.extend(["buyer_name", "buyer_gstin", "buyer_state", "buyer_address", "place_of_supply"])
+    for field in fields:
+        if str(voucher.get(field) or "") != str(row.get(field) or ""):
+            raise HTTPException(status_code=400, detail=f"Rows with the same voucher_id must have the same {field}")
+
+
+def _update_group_validation(row_ids: list[int], status: str, error: str | None, voucher: dict[str, Any] | None) -> None:
+    for row_id in row_ids:
+        database.update_import_row_validation(row_id, status, error, voucher)
+        if voucher:
+            database.update_import_row_gst_totals(row_id, voucher)
+
+
+def _update_group_commit(row_ids: list[int], status: str, error: str | None, response: Any = None) -> None:
+    for row_id in row_ids:
+        database.update_import_row_commit(row_id, status, error, response)
+
+
 def _single_voucher_import_row(request: CreateVoucherRequest) -> tuple[str, dict[str, Any]]:
     voucher_type = request.voucher_type.strip().lower().replace("-", "_").replace(" ", "_")
-    product_name = request.product_name.strip()
-    if not product_name:
-        raise HTTPException(status_code=400, detail="Product is required")
+    items = _single_voucher_items(request)
     selected_date = (request.voucher_date or date.today()).isoformat()
     if voucher_type in {"walk_in", "walk_in_customer", "retail", "retail_sales", "individual_customer"}:
         payment_mode = str(request.payment_mode or "").strip()
@@ -1075,9 +1160,11 @@ def _single_voucher_import_row(request: CreateVoucherRequest) -> tuple[str, dict
             raise HTTPException(status_code=400, detail="Payment mode is required")
         return IMPORT_TYPE_RETAIL, {
             "source_row_id": "single",
-            "product_name": product_name,
-            "price": request.price,
-            "quantity": request.quantity,
+            "voucher_id": "single",
+            "product_name": items[0]["product_name"],
+            "price": items[0]["price"],
+            "quantity": items[0]["quantity"],
+            "items": items,
             "payment_mode": payment_mode,
             "voucher_date": selected_date,
         }
@@ -1093,9 +1180,11 @@ def _single_voucher_import_row(request: CreateVoucherRequest) -> tuple[str, dict
             raise HTTPException(status_code=400, detail="Customer state is required")
         return IMPORT_TYPE_GST, {
             "source_row_id": "single",
-            "product_name": product_name,
-            "price": request.price,
-            "quantity": request.quantity,
+            "voucher_id": "single",
+            "product_name": items[0]["product_name"],
+            "price": items[0]["price"],
+            "quantity": items[0]["quantity"],
+            "items": [{**item, "price_is_inclusive_total": True} for item in items],
             "price_is_inclusive_total": True,
             "payment_mode": str(request.payment_mode or "credit").strip().lower() or "credit",
             "voucher_date": selected_date,
@@ -1106,6 +1195,24 @@ def _single_voucher_import_row(request: CreateVoucherRequest) -> tuple[str, dict
             "place_of_supply": str(request.place_of_supply or buyer_state).strip(),
         }
     raise HTTPException(status_code=400, detail="Unsupported voucher type")
+
+
+def _single_voucher_items(request: CreateVoucherRequest) -> list[dict[str, Any]]:
+    raw_items = [_model_to_dict(item) for item in request.items] if request.items else []
+    if not raw_items:
+        product_name = str(request.product_name or "").strip()
+        if not product_name:
+            raise HTTPException(status_code=400, detail="Product is required")
+        if request.price is None:
+            raise HTTPException(status_code=400, detail="Total selling price is required")
+        raw_items = [{"product_name": product_name, "quantity": request.quantity or 1, "price": request.price}]
+    items = []
+    for index, item in enumerate(raw_items):
+        product_name = str(item.get("product_name") or "").strip()
+        if not product_name:
+            raise HTTPException(status_code=400, detail=f"Item {index + 1}: Product is required")
+        items.append({"product_name": product_name, "quantity": item["quantity"], "price": item["price"]})
+    return items
 
 
 def _build_single_voucher_preview(company: dict[str, Any], row: dict[str, Any], import_type: str, user_id: int) -> dict[str, Any]:
@@ -1129,12 +1236,14 @@ def _build_single_voucher_preview(company: dict[str, Any], row: dict[str, Any], 
 
 def _single_voucher_preview_row(row: dict[str, Any], voucher: dict[str, Any] | None, error: str | None) -> dict[str, Any]:
     tax = (voucher or {}).get("TaxSplit") or {}
+    items = row.get("items") or [{"product_name": row["product_name"], "price": row["price"], "quantity": row.get("quantity")}]
     return {
         "id": 0,
         "source_row_id": str(row.get("source_row_id") or "single"),
-        "product_name": row["product_name"],
+        "product_name": ", ".join(str(item.get("product_name") or "") for item in items),
         "price": row["price"],
         "quantity": row.get("quantity"),
+        "items": items,
         "rate": row.get("rate"),
         "payment_mode": row.get("payment_mode") or "",
         "voucher_date": row["voucher_date"],
@@ -1200,23 +1309,22 @@ def _process_import_rows(company: dict[str, Any], import_id: int, user: dict[str
     rows = database.list_import_rows(import_id, company["id"])
     import_type = normalize_import_type(import_record.get("import_type"))
     logger.info("import.process.start user_id=%s company_id=%s import_id=%s import_type=%s rows=%s", user["id"], company["id"], import_id, import_type, len(rows))
+    price_is_inclusive_total = str(import_record.get("filename") or "") == "Single Voucher - GST Firm"
+    grouped_rows = _group_rows_for_vouchers(rows, import_type, price_is_inclusive_total=price_is_inclusive_total)
     if import_type == IMPORT_TYPE_GST:
-        price_is_inclusive_total = str(import_record.get("filename") or "") == "Single Voucher - GST Firm"
-        result = build_gst_invoices([_row_to_gst(row, price_is_inclusive_total=price_is_inclusive_total) for row in rows], company=company, user_id=user["id"])
+        result = build_gst_invoices(grouped_rows, company=company, user_id=user["id"])
     else:
-        result = build_vouchers([_row_to_sale(row) for row in rows], ensure_ledgers=False, company=company, user_id=user["id"])
+        result = build_vouchers(grouped_rows, ensure_ledgers=False, company=company, user_id=user["id"])
     vouchers_by_row = {voucher["Source"]["import_row_id"]: voucher for voucher in result.vouchers}
     errors_by_row = {
-        rows[item["row"]]["id"]: item["error"]
+        grouped_rows[item["row"]]["import_row_id"]: item["error"]
         for item in result.errors
-        if item.get("row") is not None and item["row"] < len(rows)
+        if item.get("row") is not None and item["row"] < len(grouped_rows)
     }
-    for row in rows:
-        voucher = vouchers_by_row.get(row["id"])
-        error = errors_by_row.get(row["id"])
-        database.update_import_row_validation(row["id"], "valid" if voucher else "invalid", error, voucher)
-        if voucher:
-            database.update_import_row_gst_totals(row["id"], voucher)
+    for row in grouped_rows:
+        voucher = vouchers_by_row.get(row["import_row_id"])
+        error = errors_by_row.get(row["import_row_id"])
+        _update_group_validation([int(row_id) for row_id in row.get("import_row_ids", [])], "valid" if voucher else "invalid", error, voucher)
     database.update_import_counts(import_id)
     logger.info(
         "import.process.completed user_id=%s company_id=%s import_id=%s import_type=%s rows=%s valid_rows=%s invalid_rows=%s duration_ms=%s",
@@ -1290,12 +1398,14 @@ def _enqueue_polling_commit_run(run_id: int, company_id: int, import_id: int, re
     database.update_commit_run_status(run_id, "processing", total_count=len(rows))
     try:
         is_gst = normalize_import_type(import_record.get("import_type")) == IMPORT_TYPE_GST
+        price_is_inclusive_total = str(import_record.get("filename") or "") == "Single Voucher - GST Firm"
+        grouped_rows = _group_rows_for_vouchers(rows, IMPORT_TYPE_GST if is_gst else IMPORT_TYPE_RETAIL, price_is_inclusive_total=price_is_inclusive_total)
         if is_gst:
-            result = build_gst_invoices([_row_to_gst(row) for row in rows], company=company, user_id=user["id"])
-            required_ledgers = required_gst_ledgers_for_rows([_row_to_gst(row) for row in rows], company)
+            result = build_gst_invoices(grouped_rows, company=company, user_id=user["id"])
+            required_ledgers = required_gst_ledgers_for_rows(grouped_rows, company)
         else:
-            result = build_vouchers([_row_to_sale(row) for row in rows], ensure_ledgers=False, company=company, user_id=user["id"])
-            required_ledgers = required_ledgers_for_rows([_row_to_sale(row) for row in rows], company)
+            result = build_vouchers(grouped_rows, ensure_ledgers=False, company=company, user_id=user["id"])
+            required_ledgers = required_ledgers_for_rows(grouped_rows, company)
         missing_ledger_job_ids = _enqueue_missing_ledger_jobs(
             user_id=user["id"],
             company=company,
@@ -1305,16 +1415,17 @@ def _enqueue_polling_commit_run(run_id: int, company_id: int, import_id: int, re
         )
         voucher_job_count = 0
         skipped_count = 0
-        rows_by_id = {int(row["id"]): row for row in rows}
+        grouped_rows_by_id = {int(row["import_row_id"]): row for row in grouped_rows}
         for voucher in result.vouchers:
             if not is_gst:
                 validate_voucher(voucher)
             source = voucher.get("Source") or {}
             fingerprint = source.get("source_fingerprint")
             import_row_id = source.get("import_row_id")
+            import_row_ids = [int(row_id) for row_id in (source.get("import_row_ids") or [import_row_id]) if row_id]
             if fingerprint and database.successful_fingerprint_exists(str(fingerprint), company_id=company_id):
-                if import_row_id:
-                    database.update_import_row_commit(int(import_row_id), "success", None, {"status": "already_committed"})
+                if import_row_ids:
+                    _update_group_commit(import_row_ids, "success", None, {"status": "already_committed"})
                 skipped_count += 1
                 logger.info(
                     "commit_run.voucher_skipped_already_committed run_id=%s company_id=%s import_id=%s import_row_id=%s",
@@ -1325,7 +1436,7 @@ def _enqueue_polling_commit_run(run_id: int, company_id: int, import_id: int, re
                 )
                 continue
             voucher_required_ledgers = _required_ledgers_for_voucher_row(
-                rows_by_id.get(int(import_row_id)) if import_row_id else None,
+                grouped_rows_by_id.get(int(import_row_id)) if import_row_id else None,
                 company,
                 is_gst=is_gst,
             )
@@ -1355,9 +1466,9 @@ def _enqueue_polling_commit_run(run_id: int, company_id: int, import_id: int, re
                 job.get("depends_on_job_ids"),
             )
         for error in result.errors:
-            row = rows[error["row"]]
-            database.update_import_row_commit(row["id"], "failed", error["error"])
-            logger.warning("commit_run.row_build_failed run_id=%s company_id=%s import_id=%s row_id=%s error=%s", run_id, company_id, import_id, row["id"], error["error"])
+            row = grouped_rows[error["row"]]
+            _update_group_commit([int(row_id) for row_id in row.get("import_row_ids", [])], "failed", error["error"])
+            logger.warning("commit_run.row_build_failed run_id=%s company_id=%s import_id=%s row_id=%s error=%s", run_id, company_id, import_id, row.get("import_row_id"), error["error"])
         run = database.refresh_commit_run_from_rows(run_id)
         logger.info(
             "commit_run.polling_enqueue.completed run_id=%s user_id=%s company_id=%s import_id=%s import_type=%s total_rows=%s ledger_jobs=%s voucher_jobs=%s skipped_count=%s build_errors=%s status=%s duration_ms=%s",
@@ -1420,6 +1531,8 @@ def _enqueue_missing_ledger_jobs(
 def _required_ledgers_for_voucher_row(row: dict[str, Any] | None, company: dict[str, Any], is_gst: bool) -> list[dict[str, str]]:
     if not row:
         return []
+    if row.get("items"):
+        return required_gst_ledgers_for_rows([row], company) if is_gst else required_ledgers_for_rows([row], company)
     if is_gst:
         return required_gst_ledgers_for_rows([_row_to_gst(row)], company)
     return required_ledgers_for_rows([_row_to_sale(row)], company)

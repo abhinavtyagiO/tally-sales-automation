@@ -41,12 +41,16 @@ def parse_excel(content: bytes, import_type: str = IMPORT_TYPE_RETAIL) -> list[d
         product_name = str(row["product_name"]).strip()
         payment_mode = str(row["payment_mode"]).strip().lower()
         price = pd.to_numeric(row["price"], errors="coerce")
+        quantity = pd.to_numeric(row["quantity"], errors="coerce") if "quantity" in row else 1
         voucher_date = _parse_date(row["voucher_date"])
+        voucher_id = _cell_text(row.get("voucher_id")) if "voucher_id" in row else ""
 
         if not product_name or product_name.lower() == "nan":
             raise ExcelParseError(f"Row {index + 2}: product_name is required")
         if pd.isna(price) or float(price) <= 0:
             raise ExcelParseError(f"Row {index + 2}: price must be a positive number")
+        if pd.isna(quantity) or float(quantity) <= 0:
+            raise ExcelParseError(f"Row {index + 2}: quantity must be a positive number")
         if not payment_mode or payment_mode == "nan":
             raise ExcelParseError(f"Row {index + 2}: payment_mode is required")
         if voucher_date is None:
@@ -56,8 +60,10 @@ def parse_excel(content: bytes, import_type: str = IMPORT_TYPE_RETAIL) -> list[d
             {
                 "product_name": product_name,
                 "price": float(price),
+                "quantity": float(quantity),
                 "payment_mode": payment_mode,
                 "voucher_date": voucher_date.isoformat(),
+                "voucher_id": voucher_id or None,
                 "source_row_id": str(index + 2),
             }
         )
@@ -75,6 +81,7 @@ def _parse_gst_row(row: Any, index: int) -> dict[str, Any]:
     buyer_state = _cell_text(row["buyer_state"])
     buyer_address = _cell_text(row.get("buyer_address")) if "buyer_address" in row else ""
     place_of_supply = _cell_text(row.get("place_of_supply")) if "place_of_supply" in row else buyer_state
+    voucher_id = _cell_text(row.get("voucher_id")) if "voucher_id" in row else ""
     quantity = pd.to_numeric(row["quantity"], errors="coerce")
     rate = pd.to_numeric(row["rate"], errors="coerce")
     voucher_date = _parse_date(row["voucher_date"])
@@ -108,6 +115,7 @@ def _parse_gst_row(row: Any, index: int) -> dict[str, Any]:
         "buyer_state": buyer_state,
         "buyer_address": buyer_address,
         "place_of_supply": place_of_supply or buyer_state,
+        "voucher_id": voucher_id or None,
         "source_row_id": str(index + 2),
     }
 

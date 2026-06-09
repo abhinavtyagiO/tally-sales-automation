@@ -169,6 +169,7 @@ def init_db() -> None:
                 import_id INTEGER NOT NULL,
                 company_id INTEGER NOT NULL,
                 source_row_id TEXT NOT NULL,
+                voucher_id TEXT,
                 product_name TEXT NOT NULL,
                 price REAL NOT NULL,
                 quantity REAL,
@@ -348,6 +349,7 @@ def _migrate_existing_tables(connection: sqlite3.Connection) -> None:
         ("stock_items", "taxability", "TEXT"),
         ("stock_items", "raw_json", "TEXT"),
         ("imports", "import_type", "TEXT NOT NULL DEFAULT 'retail_sales'"),
+        ("import_rows", "voucher_id", "TEXT"),
         ("import_rows", "quantity", "REAL"),
         ("import_rows", "rate", "REAL"),
         ("import_rows", "buyer_name", "TEXT"),
@@ -1535,18 +1537,19 @@ def create_import(user_id: int, company_id: int, filename: str | None, rows: lis
         connection.executemany(
             """
             INSERT INTO import_rows (
-                import_id, company_id, source_row_id, product_name, price,
+                import_id, company_id, source_row_id, voucher_id, product_name, price,
                 quantity, rate, payment_mode, voucher_date, buyer_name, buyer_gstin,
                 buyer_state, buyer_address, place_of_supply, taxable_amount, gst_rate,
                 cgst_amount, sgst_amount, igst_amount, total_amount
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             [
                 (
                     import_id,
                     company_id,
                     str(row.get("source_row_id") or index + 1),
+                    row.get("voucher_id"),
                     row["product_name"],
                     float(row.get("price") or row.get("rate") or 0),
                     _optional_float(row.get("quantity")),
@@ -1818,8 +1821,8 @@ def refresh_commit_run_from_rows(run_id: int) -> dict[str, Any] | None:
                     (error_message, now, now, job["id"]),
                 )
                 source = ((job.get("payload") or {}).get("voucher") or {}).get("Source") or {}
-                import_row_id = source.get("import_row_id")
-                if import_row_id:
+                import_row_ids = source.get("import_row_ids") or ([source.get("import_row_id")] if source.get("import_row_id") else [])
+                for import_row_id in import_row_ids:
                     connection.execute(
                         "UPDATE import_rows SET commit_status = 'failed', commit_error = COALESCE(commit_error, ?) WHERE id = ? AND commit_status != 'success'",
                         (error_message, int(import_row_id)),

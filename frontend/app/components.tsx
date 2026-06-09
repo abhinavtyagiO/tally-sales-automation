@@ -623,6 +623,7 @@ const DEFAULT_SINGLE_VOUCHER_DRAFT: SingleVoucherDraft = {
   product_name: "",
   quantity: 1,
   price: 0,
+  items: [{ product_name: "", quantity: 1, price: 0 }],
   payment_mode: "Cash",
   voucher_date: new Date().toISOString().slice(0, 10),
   buyer_name: "",
@@ -665,7 +666,9 @@ export function CreateVoucherView({
   const isGstFirm = draft.voucher_type === "gst_firm";
   const draftKey = JSON.stringify(draft);
   const previewReady = Boolean(preview?.valid && lastPreviewKey === draftKey);
-  const canPreview = Boolean(draft.product_name.trim() && draft.quantity > 0 && draft.price > 0 && draft.voucher_date && connected && stockSyncReady && (isGstFirm ? draft.buyer_name.trim() && draft.buyer_gstin.trim() && draft.buyer_state.trim() : draft.payment_mode.trim()));
+  const voucherItems = draft.items.length ? draft.items : [{ product_name: draft.product_name, quantity: draft.quantity, price: draft.price }];
+  const itemsReady = voucherItems.length > 0 && voucherItems.every((item) => item.product_name.trim() && item.quantity > 0 && item.price > 0);
+  const canPreview = Boolean(itemsReady && draft.voucher_date && connected && stockSyncReady && (isGstFirm ? draft.buyer_name.trim() && draft.buyer_gstin.trim() && draft.buyer_state.trim() : draft.payment_mode.trim()));
 
   useEffect(() => {
     let active = true;
@@ -688,6 +691,21 @@ export function CreateVoucherView({
 
   function updateDraft(partial: Partial<SingleVoucherDraft>) {
     setDraft((current) => ({ ...current, ...partial }));
+  }
+
+  function updateItem(index: number, partial: Partial<SingleVoucherDraft["items"][number]>) {
+    setDraft((current) => {
+      const nextItems = current.items.map((item, itemIndex) => (itemIndex === index ? { ...item, ...partial } : item));
+      return { ...current, items: nextItems };
+    });
+  }
+
+  function addItem() {
+    setDraft((current) => ({ ...current, items: [...current.items, { product_name: "", quantity: 1, price: 0 }] }));
+  }
+
+  function removeItem(index: number) {
+    setDraft((current) => ({ ...current, items: current.items.filter((_, itemIndex) => itemIndex !== index) || current.items }));
   }
 
   async function handlePreview() {
@@ -769,19 +787,31 @@ export function CreateVoucherView({
                 </label>
               </div>
             )}
+            <div className="voucher-items">
+              {voucherItems.map((item, index) => (
+                <div className="voucher-item-row" key={index}>
+                  <label className="wide-field">
+                    <span>Product</span>
+                    <ProductSearchInput value={item.product_name} items={stockItems} loading={loadingProducts} disabled={busy} onChange={(value) => updateItem(index, { product_name: value })} />
+                  </label>
+                  <label>
+                    <span>Quantity</span>
+                    <input value={item.quantity || ""} onChange={(event) => updateItem(index, { quantity: Number(event.target.value) })} type="number" min="0.01" step="0.01" disabled={busy} />
+                  </label>
+                  <label>
+                    <span>Total Selling Price</span>
+                    <input value={item.price || ""} onChange={(event) => updateItem(index, { price: Number(event.target.value) })} type="number" min="0.01" step="0.01" disabled={busy} />
+                  </label>
+                  <button className="icon-button" type="button" onClick={() => removeItem(index)} disabled={busy || voucherItems.length === 1} title="Remove item">
+                    <XCircle size={18} />
+                  </button>
+                </div>
+              ))}
+              <button className="ghost-button" type="button" onClick={addItem} disabled={busy}>
+                <Plus size={18} /> Add item
+              </button>
+            </div>
             <div className="form-grid">
-              <label className="wide-field">
-                <span>Product</span>
-                <ProductSearchInput value={draft.product_name} items={stockItems} loading={loadingProducts} disabled={busy} onChange={(value) => updateDraft({ product_name: value })} />
-              </label>
-              <label>
-                <span>Quantity</span>
-                <input value={draft.quantity || ""} onChange={(event) => updateDraft({ quantity: Number(event.target.value) })} type="number" min="0.01" step="0.01" disabled={busy} />
-              </label>
-              <label>
-                <span>Total Selling Price</span>
-                <input value={draft.price || ""} onChange={(event) => updateDraft({ price: Number(event.target.value) })} type="number" min="0.01" step="0.01" disabled={busy} />
-              </label>
               {!isGstFirm && (
                 <label>
                   <span>Payment Mode</span>
@@ -815,12 +845,12 @@ export function CreateVoucherView({
             {preview?.row && (
               <div className="voucher-preview-list">
                 <p>
-                  <span>Product</span>
-                  <strong>{preview.row.product_name}</strong>
+                  <span>Items</span>
+                  <strong>{(preview.row.items || voucherItems).length}</strong>
                 </p>
                 <p>
                   <span>Quantity</span>
-                  <strong>{formatNumber(Number(preview.row.quantity || draft.quantity))}</strong>
+                  <strong>{formatNumber((preview.row.items || voucherItems).reduce((total, item) => total + Number(item.quantity || 0), 0))}</strong>
                 </p>
                 <p>
                   <span>{isGstFirm ? "Total" : "Price"}</span>
@@ -857,30 +887,42 @@ export function CreateVoucherView({
 }
 
 function resolveSingleVoucherDraftProduct(draft: SingleVoucherDraft, items: StockItem[]) {
-  const productValue = draft.product_name.trim();
-  if (!productValue || !items.length) return { draft, error: "" };
-  const normalizedProduct = normalizeProductSearchValue(productValue);
-  const exactMatches = items.filter((item) =>
-    productSearchValues(item).some((value) => normalizeProductSearchValue(value) === normalizedProduct),
-  );
-  if (exactMatches.length === 1) return { draft: { ...draft, product_name: exactMatches[0].name }, error: "" };
-  if (exactMatches.length > 1) {
-    return {
-      draft,
-      error: "Multiple synced products match this value. Select the exact product from the dropdown.",
-    };
+  if (!items.length) return { draft, error: "" };
+  const resolvedItems = [];
+  for (const item of draft.items) {
+    const productValue = item.product_name.trim();
+    if (!productValue) {
+      resolvedItems.push(item);
+      continue;
+    }
+    const normalizedProduct = normalizeProductSearchValue(productValue);
+    const exactMatches = items.filter((stockItem) =>
+      productSearchValues(stockItem).some((value) => normalizeProductSearchValue(value) === normalizedProduct),
+    );
+    if (exactMatches.length === 1) {
+      resolvedItems.push({ ...item, product_name: exactMatches[0].name });
+      continue;
+    }
+    if (exactMatches.length > 1) {
+      return { draft, error: "Multiple synced products match this value. Select the exact product from the dropdown." };
+    }
+    const partialMatches = items.filter((stockItem) =>
+      productSearchValues(stockItem).some((value) => normalizeProductSearchValue(value).includes(normalizedProduct)),
+    );
+    if (partialMatches.length === 1) {
+      resolvedItems.push({ ...item, product_name: partialMatches[0].name });
+      continue;
+    }
+    if (partialMatches.length > 1) {
+      return { draft, error: "Multiple synced products match this search. Select the exact product from the dropdown." };
+    }
+    resolvedItems.push(item);
   }
-  const partialMatches = items.filter((item) =>
-    productSearchValues(item).some((value) => normalizeProductSearchValue(value).includes(normalizedProduct)),
-  );
-  if (partialMatches.length === 1) return { draft: { ...draft, product_name: partialMatches[0].name }, error: "" };
-  if (partialMatches.length > 1) {
-    return {
-      draft,
-      error: "Multiple synced products match this search. Select the exact product from the dropdown.",
-    };
-  }
-  return { draft, error: "" };
+  const firstItem = resolvedItems[0] || draft.items[0];
+  return {
+    draft: { ...draft, items: resolvedItems, product_name: firstItem?.product_name || "", quantity: firstItem?.quantity || 1, price: firstItem?.price || 0 },
+    error: "",
+  };
 }
 
 function productSearchValues(item: StockItem) {

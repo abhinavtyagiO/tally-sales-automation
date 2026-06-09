@@ -47,33 +47,33 @@ def build_vouchers(
             errors.append({"row": index, "product_name": product_name, "error": _sales_ledger_error(company)})
             continue
 
-        stock_item = database.get_stock_item_by_name(product_name, company_id=company_id)
-        if not stock_item:
-            errors.append(
-                {
-                    "row": index,
-                    "product_name": product_name,
-                    "error": _missing_stock_item_error(company_id),
-                }
-            )
-            continue
-
-        stock = dict(stock_item)
         try:
+            items = _row_items(row)
+            product_name = ", ".join(item.get("product_name", "") for item in items)
             voucher_date = _parse_voucher_date(row.get("voucher_date"))
-            quantity = _positive_float(row.get("quantity") or 1, "quantity")
             party_ledger = _resolve_party_ledger(str(row.get("payment_mode", "")).lower(), ensure_ledgers, company=company)
             source = _build_source(row, index, voucher_date, company_id=company_id, user_id=user_id)
+            voucher_items = []
+            for item in items:
+                item_name = str(item.get("product_name", "")).strip()
+                stock_item = database.get_stock_item_by_name(item_name, company_id=company_id)
+                if not stock_item:
+                    raise VoucherBuildError(_missing_stock_item_error(company_id))
+                voucher_items.append(
+                    {
+                        "stock_item_name": dict(stock_item)["name"],
+                        "price": float(item["price"]),
+                        "quantity": _positive_float(item.get("quantity") or 1, "quantity"),
+                        "stock_item": dict(stock_item),
+                    }
+                )
             voucher = _build_sales_voucher(
-                stock_item_name=stock["name"],
-                price=float(row["price"]),
-                quantity=quantity,
+                items=voucher_items,
                 payment_mode=str(row["payment_mode"]).lower(),
                 voucher_date=voucher_date.isoformat(),
                 party_ledger=party_ledger,
                 sales_ledger=sales_ledger,
                 source=source,
-                stock_item=stock,
                 company=company,
             )
             _validate_voucher(voucher)
@@ -184,6 +184,37 @@ def _payment_mode_to_ledger_name(payment_mode: str) -> str:
     return " ".join(part.capitalize() for part in payment_mode.replace("_", " ").replace("-", " ").split())
 
 
+def _row_items(row: dict[str, Any]) -> list[dict[str, Any]]:
+    raw_items = row.get("items")
+    if raw_items:
+        if not isinstance(raw_items, list):
+            raise VoucherBuildError("items must be a list")
+        items = raw_items
+    else:
+        items = [
+            {
+                "product_name": row.get("product_name"),
+                "price": row.get("price"),
+                "quantity": row.get("quantity") or 1,
+            }
+        ]
+    if not items:
+        raise VoucherBuildError("At least one item is required")
+    normalized = []
+    for index, item in enumerate(items):
+        product_name = str((item or {}).get("product_name", "")).strip()
+        if not product_name:
+            raise VoucherBuildError(f"items[{index}].product_name is required")
+        normalized.append(
+            {
+                "product_name": product_name,
+                "price": _positive_float((item or {}).get("price"), "price"),
+                "quantity": _positive_float((item or {}).get("quantity") or 1, "quantity"),
+            }
+        )
+    return normalized
+
+
 def _company_value(company: dict[str, Any] | None, key: str, default: str) -> str:
     if not company:
         return default
@@ -208,41 +239,36 @@ def _ensure_ledger_exists(name: str, group_name: str, company: dict[str, Any] | 
 
 
 def _build_sales_voucher(
-    stock_item_name: str,
-    price: float,
-    quantity: float,
+    items: list[dict[str, Any]],
     payment_mode: str,
     voucher_date: str,
     party_ledger: str,
     sales_ledger: str,
     source: dict[str, Any],
-    stock_item: dict[str, Any],
     company: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    tax = _calculate_inclusive_cgst_sgst(price, stock_item)
-    sales_amount = tax["taxable_amount"]
-    invoice_total = tax["invoice_total"]
-    unit_rate = round(sales_amount / quantity, 2)
-    cgst_ledger = _company_value(company, "cgst_ledger_name", config.CGST_LEDGER_NAME)
-    sgst_ledger = _company_value(company, "sgst_ledger_name", config.SGST_LEDGER_NAME)
-    return {
-        "VoucherKind": "individual_customer_invoice",
-        "VoucherTypeName": "Sales",
-        "Date": voucher_date,
-        "PartyLedgerName": party_ledger,
-        "PaymentMode": payment_mode,
-        "CGSTLedgerName": cgst_ledger,
-        "SGSTLedgerName": sgst_ledger,
-        "TaxableAmount": sales_amount,
-        "GSTAmount": tax["gst_amount"],
-        "InvoiceTotal": invoice_total,
-        "TaxSplit": tax,
-        "Source": source,
-        "InventoryEntries": [
+    inventory_entries = []
+    taxable_amount = 0.0
+    cgst_amount = 0.0
+    sgst_amount = 0.0
+    invoice_total = 0.0
+    gst_rate = 0.0
+    for item in items:
+        stock_item = item["stock_item"]
+        quantity = item["quantity"]
+        tax = _calculate_inclusive_cgst_sgst(item["price"], stock_item)
+        line_sales_amount = float(tax["taxable_amount"])
+        unit_rate = round(line_sales_amount / quantity, 2)
+        taxable_amount = round(taxable_amount + line_sales_amount, 2)
+        cgst_amount = round(cgst_amount + float(tax["cgst_amount"]), 2)
+        sgst_amount = round(sgst_amount + float(tax["sgst_amount"]), 2)
+        invoice_total = round(invoice_total + float(tax["invoice_total"]), 2)
+        gst_rate = float(tax["gst_rate"]) if not gst_rate else gst_rate
+        inventory_entries.append(
             {
-                "StockItemName": stock_item_name,
+                "StockItemName": item["stock_item_name"],
                 "Rate": unit_rate,
-                "Amount": sales_amount,
+                "Amount": line_sales_amount,
                 "Quantity": quantity,
                 "Unit": stock_item.get("base_unit") or "nos",
                 "HSNCode": stock_item.get("hsn_code") or "",
@@ -254,11 +280,41 @@ def _build_sales_voucher(
                 "IGSTRate": tax["igst_rate"],
                 "SalesLedgerName": sales_ledger,
             }
-        ],
+        )
+    gst_amount = round(cgst_amount + sgst_amount, 2)
+    tax = {
+        "taxable_amount": taxable_amount,
+        "gst_rate": gst_rate,
+        "same_state": True,
+        "cgst_rate": gst_rate / 2 if gst_rate else 0.0,
+        "sgst_rate": gst_rate / 2 if gst_rate else 0.0,
+        "igst_rate": 0.0,
+        "cgst_amount": cgst_amount,
+        "sgst_amount": sgst_amount,
+        "igst_amount": 0.0,
+        "gst_amount": gst_amount,
+        "invoice_total": invoice_total,
+    }
+    cgst_ledger = _company_value(company, "cgst_ledger_name", config.CGST_LEDGER_NAME)
+    sgst_ledger = _company_value(company, "sgst_ledger_name", config.SGST_LEDGER_NAME)
+    return {
+        "VoucherKind": "individual_customer_invoice",
+        "VoucherTypeName": "Sales",
+        "Date": voucher_date,
+        "PartyLedgerName": party_ledger,
+        "PaymentMode": payment_mode,
+        "CGSTLedgerName": cgst_ledger,
+        "SGSTLedgerName": sgst_ledger,
+        "TaxableAmount": taxable_amount,
+        "GSTAmount": gst_amount,
+        "InvoiceTotal": invoice_total,
+        "TaxSplit": tax,
+        "Source": source,
+        "InventoryEntries": inventory_entries,
         "LedgerEntries": [
             {
                 "LedgerName": sales_ledger,
-                "Amount": sales_amount,
+                "Amount": taxable_amount,
             },
             {
                 "LedgerName": cgst_ledger,
@@ -357,13 +413,19 @@ def _build_source(row: dict[str, Any], index: int, voucher_date: date, company_i
     source_row_id = str(row.get("source_row_id") or index + 1)
     raw_import_id = row.get("import_id") or voucher_date.isoformat()
     import_id_for_fingerprint = str(raw_import_id)
+    items = _row_items(row)
     fingerprint_payload = {
         "import_id": import_id_for_fingerprint,
         "company_id": company_id,
         "source_row_id": source_row_id,
-        "product_name": str(row.get("product_name", "")).strip().lower(),
-        "price": round(float(row.get("price", 0)), 2),
-        "quantity": round(float(row.get("quantity") or 1), 4),
+        "items": [
+            {
+                "product_name": item["product_name"].lower(),
+                "price": round(float(item["price"]), 2),
+                "quantity": round(float(item["quantity"]), 4),
+            }
+            for item in items
+        ],
         "payment_mode": str(row.get("payment_mode", "")).strip().lower(),
         "voucher_date": voucher_date.isoformat(),
     }
@@ -373,6 +435,7 @@ def _build_source(row: dict[str, Any], index: int, voucher_date: date, company_i
         "company_id": company_id,
         "import_id": raw_import_id,
         "import_row_id": row.get("import_row_id"),
+        "import_row_ids": row.get("import_row_ids") or ([row.get("import_row_id")] if row.get("import_row_id") else []),
         "source_row_id": source_row_id,
         "source_fingerprint": fingerprint,
     }
