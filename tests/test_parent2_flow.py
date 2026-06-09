@@ -956,7 +956,7 @@ class Parent2FlowTests(unittest.TestCase):
                 voucher_type="gst_firm",
                 product_name="GST Coffee",
                 quantity=20,
-                price=75,
+                price=1575,
                 voucher_date="2026-05-31",
                 buyer_name="Chanda Enterprises",
                 buyer_gstin="29AAACH1004N1ZQ",
@@ -968,7 +968,87 @@ class Parent2FlowTests(unittest.TestCase):
         self.assertTrue(result["valid"])
         self.assertEqual(result["row"]["taxable_amount"], 1500)
         self.assertEqual(result["row"]["total_amount"], 1575)
+        self.assertEqual(result["voucher"]["InventoryEntries"][0]["Rate"], 75)
         self.assertEqual(result["voucher"]["PartyLedgerName"], "Chanda Enterprises")
+
+    def test_single_gst_firm_voucher_price_is_inclusive_line_total(self) -> None:
+        company = self.make_company()
+        database.update_company(
+            company["id"],
+            self.user["id"],
+            {"supplier_gstin": "29AAECP4424C1ZN", "supplier_state": "Karnataka"},
+        )
+        company = database.get_company(company["id"], user_id=self.user["id"])
+        database.replace_stock_items(
+            [{"name": "GST Tyre", "base_unit": "nos", "gst_rate": 18, "taxability": "Taxable"}],
+            company_id=company["id"],
+        )
+
+        result = routes.preview_single_voucher(
+            company["id"],
+            routes.CreateVoucherRequest(
+                voucher_type="gst_firm",
+                product_name="GST Tyre",
+                quantity=10,
+                price=500,
+                voucher_date="2026-05-31",
+                buyer_name="Chanda Enterprises",
+                buyer_gstin="29AAACH1004N1ZQ",
+                buyer_state="Karnataka",
+            ),
+            user=self.user,
+        )
+
+        self.assertTrue(result["valid"])
+        self.assertEqual(result["row"]["price"], 500)
+        self.assertEqual(result["row"]["quantity"], 10)
+        self.assertEqual(result["row"]["taxable_amount"], 423.73)
+        self.assertEqual(result["row"]["cgst_amount"], 38.13)
+        self.assertEqual(result["row"]["sgst_amount"], 38.14)
+        self.assertEqual(result["row"]["total_amount"], 500)
+        self.assertEqual(result["voucher"]["InventoryEntries"][0]["Rate"], 42.37)
+        self.assertEqual(result["voucher"]["InventoryEntries"][0]["Amount"], 423.73)
+
+    def test_persisted_single_gst_firm_voucher_price_remains_inclusive_line_total(self) -> None:
+        company = self.make_company()
+        database.update_company(
+            company["id"],
+            self.user["id"],
+            {"supplier_gstin": "29AAECP4424C1ZN", "supplier_state": "Karnataka"},
+        )
+        company = database.get_company(company["id"], user_id=self.user["id"])
+        database.replace_stock_items(
+            [{"name": "GST Tyre", "base_unit": "nos", "gst_rate": 18, "taxability": "Taxable"}],
+            company_id=company["id"],
+        )
+        import_record = database.create_import(
+            self.user["id"],
+            company["id"],
+            "Single Voucher - GST Firm",
+            [
+                {
+                    "source_row_id": "single",
+                    "product_name": "GST Tyre",
+                    "price": 500,
+                    "quantity": 10,
+                    "payment_mode": "credit",
+                    "voucher_date": "2026-05-31",
+                    "buyer_name": "Chanda Enterprises",
+                    "buyer_gstin": "29AAACH1004N1ZQ",
+                    "buyer_state": "Karnataka",
+                }
+            ],
+            import_type=IMPORT_TYPE_GST,
+        )
+
+        result = routes.process_import(company["id"], import_record["id"], user=self.user)
+
+        row = result["rows"][0]
+        self.assertEqual(row["validation_status"], "valid")
+        self.assertEqual(row["taxable_amount"], 423.73)
+        self.assertEqual(row["cgst_amount"], 38.13)
+        self.assertEqual(row["sgst_amount"], 38.14)
+        self.assertEqual(row["total_amount"], 500)
 
     def test_single_voucher_create_persists_one_row_and_queues_polling_commit_run(self) -> None:
         original_mode = config.CONNECTOR_MODE

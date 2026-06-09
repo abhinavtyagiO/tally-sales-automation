@@ -779,7 +779,7 @@ export function CreateVoucherView({
                 <input value={draft.quantity || ""} onChange={(event) => updateDraft({ quantity: Number(event.target.value) })} type="number" min="0.01" step="0.01" disabled={busy} />
               </label>
               <label>
-                <span>{isGstFirm ? "Selling Price" : "Total Selling Price"}</span>
+                <span>Total Selling Price</span>
                 <input value={draft.price || ""} onChange={(event) => updateDraft({ price: Number(event.target.value) })} type="number" min="0.01" step="0.01" disabled={busy} />
               </label>
               {!isGstFirm && (
