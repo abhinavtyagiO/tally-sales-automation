@@ -1040,8 +1040,8 @@ def _row_to_sale(row: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def _row_to_gst(row: dict[str, Any]) -> dict[str, Any]:
-    return {
+def _row_to_gst(row: dict[str, Any], price_is_inclusive_total: bool = False) -> dict[str, Any]:
+    converted = {
         "product_name": row["product_name"],
         "price": row["price"],
         "quantity": row["quantity"],
@@ -1057,6 +1057,10 @@ def _row_to_gst(row: dict[str, Any]) -> dict[str, Any]:
         "import_id": row["import_id"],
         "import_row_id": row["id"],
     }
+    if price_is_inclusive_total:
+        converted.pop("rate", None)
+        converted["price_is_inclusive_total"] = True
+    return converted
 
 
 def _single_voucher_import_row(request: CreateVoucherRequest) -> tuple[str, dict[str, Any]]:
@@ -1092,7 +1096,7 @@ def _single_voucher_import_row(request: CreateVoucherRequest) -> tuple[str, dict
             "product_name": product_name,
             "price": request.price,
             "quantity": request.quantity,
-            "rate": request.price,
+            "price_is_inclusive_total": True,
             "payment_mode": str(request.payment_mode or "credit").strip().lower() or "credit",
             "voucher_date": selected_date,
             "buyer_name": buyer_name,
@@ -1197,7 +1201,8 @@ def _process_import_rows(company: dict[str, Any], import_id: int, user: dict[str
     import_type = normalize_import_type(import_record.get("import_type"))
     logger.info("import.process.start user_id=%s company_id=%s import_id=%s import_type=%s rows=%s", user["id"], company["id"], import_id, import_type, len(rows))
     if import_type == IMPORT_TYPE_GST:
-        result = build_gst_invoices([_row_to_gst(row) for row in rows], company=company, user_id=user["id"])
+        price_is_inclusive_total = str(import_record.get("filename") or "") == "Single Voucher - GST Firm"
+        result = build_gst_invoices([_row_to_gst(row, price_is_inclusive_total=price_is_inclusive_total) for row in rows], company=company, user_id=user["id"])
     else:
         result = build_vouchers([_row_to_sale(row) for row in rows], ensure_ledgers=False, company=company, user_id=user["id"])
     vouchers_by_row = {voucher["Source"]["import_row_id"]: voucher for voucher in result.vouchers}

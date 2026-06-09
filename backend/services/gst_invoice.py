@@ -94,12 +94,21 @@ def build_gst_invoice(row: dict[str, Any], company: dict[str, Any], index: int =
         raise GstInvoiceError("GST rate is missing for this stock item")
     hsn_code = str(stock.get("hsn_code") or "").strip()
 
-    tax = calculate_gst_totals(
-        taxable_amount=quantity * rate,
-        gst_rate=gst_rate,
-        company_state=str(company.get("supplier_state") or ""),
-        buyer_state=buyer_state,
-    )
+    if row.get("price_is_inclusive_total"):
+        tax = calculate_gst_totals_from_inclusive_total(
+            invoice_total=_positive_float(row.get("price"), "price"),
+            gst_rate=gst_rate,
+            company_state=str(company.get("supplier_state") or ""),
+            buyer_state=buyer_state,
+        )
+        rate = round(float(tax["taxable_amount"]) / quantity, 2)
+    else:
+        tax = calculate_gst_totals(
+            taxable_amount=quantity * rate,
+            gst_rate=gst_rate,
+            company_state=str(company.get("supplier_state") or ""),
+            buyer_state=buyer_state,
+        )
     source = _build_source(row, index, voucher_date, company_id=company["id"], user_id=user_id)
     source["import_type"] = IMPORT_TYPE_GST
 
@@ -172,6 +181,35 @@ def calculate_gst_totals(taxable_amount: float, gst_rate: float, company_state: 
         "igst_amount": igst_amount,
         "gst_amount": round(cgst_amount + sgst_amount + igst_amount, 2),
         "invoice_total": round(taxable_amount + cgst_amount + sgst_amount + igst_amount, 2),
+    }
+
+
+def calculate_gst_totals_from_inclusive_total(invoice_total: float, gst_rate: float, company_state: str, buyer_state: str) -> dict[str, float | bool]:
+    invoice_total = round(float(invoice_total), 2)
+    gst_rate = float(gst_rate)
+    taxable_amount = round(invoice_total * 100 / (100 + gst_rate), 2)
+    same_state = _normalize_state(company_state) == _normalize_state(buyer_state)
+    gst_amount = round(invoice_total - taxable_amount, 2)
+    if same_state:
+        cgst_amount = round(gst_amount / 2, 2)
+        sgst_amount = round(gst_amount - cgst_amount, 2)
+        igst_amount = 0.0
+    else:
+        cgst_amount = 0.0
+        sgst_amount = 0.0
+        igst_amount = gst_amount
+    return {
+        "taxable_amount": taxable_amount,
+        "gst_rate": gst_rate,
+        "same_state": same_state,
+        "cgst_rate": gst_rate / 2 if same_state else 0.0,
+        "sgst_rate": gst_rate / 2 if same_state else 0.0,
+        "igst_rate": 0.0 if same_state else gst_rate,
+        "cgst_amount": cgst_amount,
+        "sgst_amount": sgst_amount,
+        "igst_amount": igst_amount,
+        "gst_amount": round(cgst_amount + sgst_amount + igst_amount, 2),
+        "invoice_total": invoice_total,
     }
 
 
